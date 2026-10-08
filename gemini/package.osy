@@ -1,0 +1,20 @@
+// Osysharp.Models.Gemini — the Google Gemini (Generative Language) API as an `ILlmClient`, written in Osy#.
+//
+// It needs nothing privileged. It is ordinary Osy# using only public APIs — a class implementing the Llm package's
+// `ILlmClient`, building its request with `JsonSerializer` and sending it with `Http.*` — so anyone could have written
+// it exactly as it is, for a provider the platform has never heard of.
+//
+// It asks for one host, and an app that uses it grants it or does not compile. It asks for no SECRET: the API key is a
+// setting on the registration, so the app names its own secret (`Client = new GeminiClient { ApiKey = Secret.Mine }`)
+// and this package never learns which.
+package Osysharp.Models.Gemini {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "the Google Gemini API as an app.Models `Client` — complete and stream, tools included.";
+
+  model "model/*.osy";
+  use Osysharp.Http;
+  use Osysharp.Llm;
+
+  egress "generativelanguage.googleapis.com";
+}

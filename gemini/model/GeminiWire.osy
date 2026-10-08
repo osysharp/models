@@ -1,0 +1,65 @@
+// The Google Gemini API on the wire. Its request names are snake_case and its response names are camelCase — Google's
+// own inconsistency, not a choice here — so each field says its own external name and the class names stay Osy#'s.
+namespace Osysharp.Models.Gemini;
+
+// ⭐ THE REQUEST IS TYPED, for the same reason it is in `Osysharp.Models.OpenAi`: `system_instruction`, `tools` and each
+// generation setting must be ABSENT rather than null when they do not apply, and they are independent axes — which as
+// anonymous objects is one body written many times over. `DefaultIgnoreCondition = WhenWritingNull` says it once.
+//
+// The CONTENTS are still anonymous objects (`List<Json>` below): a part is heterogeneous rather than optional, and a
+// class per shape would add names without adding meaning.
+
+/// What goes UP. ⚠ No `model` key — Gemini takes the model in the URL path.
+public class GeminiRequest {
+  /// The system prompt, as its own object rather than a message. Absent when the app declared none.
+  [ExternalName("system_instruction")] public Json? SystemInstruction;
+  [ExternalName("contents")] public List<Json> Contents = [];
+  /// Absent when the app declared no tools — and ONE object holding every declaration when it did.
+  [ExternalName("tools")] public List<Json>? Tools;
+  [ExternalName("generationConfig")] public GeminiGenerationConfig? GenerationConfig;
+}
+
+/// The sampling settings. Each is left out when the request did not ask for it.
+public class GeminiGenerationConfig {
+  [ExternalName("temperature")] public decimal? Temperature;
+  [ExternalName("topP")] public decimal? TopP;
+  [ExternalName("maxOutputTokens")] public int? MaxOutputTokens;
+}
+
+/// What comes back — from a whole call and from one streamed chunk alike, which is Gemini's own shape: a chunk is a
+/// response with fewer parts filled in.
+public class GeminiAnswer {
+  [ExternalName("candidates")] public List<GeminiCandidate>? Candidates;
+  [ExternalName("usageMetadata")] public GeminiUsage? UsageMetadata;
+}
+
+public class GeminiCandidate {
+  [ExternalName("content")] public GeminiContent? Content;
+  [ExternalName("finishReason")] public string? FinishReason;
+}
+
+public class GeminiContent {
+  [ExternalName("role")] public string? Role;
+  [ExternalName("parts")] public List<GeminiPart>? Parts;
+}
+
+/// One part of a turn. Every field belongs to some of them, which is why they are all nullable.
+public class GeminiPart {
+  [ExternalName("text")] public string? Text;
+  [ExternalName("functionCall")] public GeminiFunctionCall? FunctionCall;
+}
+
+/// ⚠ `args` IS A DOCUMENT, not text — Anthropic's shape rather than OpenAI's. A `Json` value IS its own text, so it is
+/// handed to the seam's `InputJson` as it arrived.
+public class GeminiFunctionCall {
+  [ExternalName("name")] public string? Name;
+  [ExternalName("args")] public Json? Args;
+}
+
+/// The token counts. ⚠ The platform meters from these, and `promptTokenCount` INCLUDES the cached prefix — see
+/// `GeminiClient.Cached`, which is why the client subtracts it rather than reporting both.
+public class GeminiUsage {
+  [ExternalName("promptTokenCount")] public int PromptTokenCount;
+  [ExternalName("candidatesTokenCount")] public int CandidatesTokenCount;
+  [ExternalName("cachedContentTokenCount")] public int CachedContentTokenCount;
+}

@@ -1,0 +1,287 @@
+namespace Osysharp.Models.Gemini;
+
+using Osysharp.Http;
+using Osysharp.Llm;
+
+/// The Google Gemini API as an `ILlmClient`. Register it on the model it serves:
+///
+///   app.Models = [
+///     new LlmConfig("Fast")   { Client = new GeminiClient { ApiKey = Secret.Gemini }, Model = "gemini-2.5-flash" },
+///     new LlmConfig("Strong") { Client = new GeminiClient { ApiKey = Secret.Gemini }, Model = "gemini-2.5-pro" },
+///   ];
+///
+/// ⚑ GEMINI'S SHAPE DIVERGES MORE THAN THE OTHER TWO, and all of it is handled here rather than leaking into the seam:
+/// roles are `user`/`model` (never `assistant`), the system prompt is a separate `system_instruction` rather than a
+/// message, the model id travels in the URL PATH rather than the body, and a tool result is matched back to its call by
+/// the function's NAME because Gemini has no tool-call id at all.
+///
+/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's `ILlmRouter`; this serves what
+/// it is given. A provider that second-guessed the decision would make every routing policy advisory.
+///
+/// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
+/// happen above the seam, from the token counts reported here — so report what Gemini reported, never an estimate.
+public class GeminiClient : ILlmClient {
+  /// The API key. Declared where the client is registered, so the app names its own secret:
+  /// `Client = new GeminiClient { ApiKey = Secret.Gemini }`.
+  public string ApiKey = "";
+  /// The API root. Google's own unless you are pointed at a proxy that speaks the same wire.
+  public string BaseUrl = "https://generativelanguage.googleapis.com";
+  /// Which API version to call. `v1beta` carries the tool surface this kit uses; `v1` is the stable subset.
+  public string ApiVersion = "v1beta";
+  /// What to ask for when the request does not say. Gemini does not require a bound, and this sends one anyway: an
+  /// unbounded answer is an unbounded bill.
+  public int MaxTokens = 4096;
+
+  public LlmResponse Complete(LlmRequest request) {
+    var r = Http.Post(Endpoint(request.Model, "generateContent"), Body(request), "application/json", Headers(false));
+    if (!r.IsSuccess) { throw new ExternalServiceException(Failure(r.StatusCode, r.Body)); }
+
+    var answer = JsonSerializer.Deserialize<GeminiAnswer>(r.Body);
+    var candidate = answer.Candidates == null ? null : answer.Candidates.FirstOrDefault();
+
+    List<LlmContentBlock> content = [];
+    var wantsTools = false;
+    var index = 0;
+    foreach (var part in Parts(candidate)) {
+      if (part.Text != null && part.Text != "") {
+        content.Add(new LlmContentBlock { Kind = LlmBlockKind.Text, Text = part.Text });
+      } else if (part.FunctionCall != null) {
+        wantsTools = true;
+        content.Add(new LlmContentBlock {
+          Kind = LlmBlockKind.ToolUse,
+          // ⚠ SYNTHESIZED, because Gemini sends no call id — and the seam needs one to pair a result with its call.
+          // The name alone would not do: a model may call the same tool twice in one turn.
+          ToolUseId = "gemini-tool-" + Convert.ToString(index),
+          ToolName = part.FunctionCall.Name ?? "",
+          InputJson = part.FunctionCall.Args ?? "{}",
+        });
+        index = index + 1;
+      }
+    }
+
+    var usage = answer.UsageMetadata;
+    var cached = Cached(usage);
+    return new LlmResponse {
+      Content = content,
+      StopReason = Stopped(candidate == null ? null : candidate.FinishReason, wantsTools),
+      InputTokens = Prompt(usage) - cached,
+      OutputTokens = usage == null ? 0 : usage.CandidatesTokenCount,
+      // Gemini charges no cache WRITE on an implicit cache: only reading the cached prefix is priced.
+      CacheCreationTokens = 0,
+      CacheReadTokens = cached,
+    };
+  }
+
+  /// The answer as it is written. `alt=sse` turns Gemini's streaming call into server-sent events, one JSON chunk each.
+  public stream<LlmStreamEvent> Stream(LlmRequest request) {
+    var inputTokens = 0;
+    var outputTokens = 0;
+    var cached = 0;
+    var stopReason = LlmStopReason.EndTurn;
+    var wantsTools = false;
+    var index = 0;
+
+    foreach (var frame in Http.StreamEvents(Endpoint(request.Model, "streamGenerateContent") + "?alt=sse",
+                                           Body(request), "application/json", Headers(true))) {
+      if (frame.StartsWith("{")) {
+        var chunk = JsonSerializer.Deserialize<GeminiAnswer>(frame);
+
+        if (chunk.UsageMetadata != null) {
+          cached = Cached(chunk.UsageMetadata);
+          inputTokens = chunk.UsageMetadata.PromptTokenCount - cached;
+          outputTokens = chunk.UsageMetadata.CandidatesTokenCount;
+        }
+
+        var candidate = chunk.Candidates == null ? null : chunk.Candidates.FirstOrDefault();
+        foreach (var part in Parts(candidate)) {
+          if (part.Text != null && part.Text != "") {
+            yield return new LlmStreamEvent { Kind = LlmStreamEventKind.TextDelta, Delta = part.Text };
+          } else if (part.FunctionCall != null) {
+            wantsTools = true;
+            // ⚑ A WHOLE CALL IN ONE PART — Gemini streams no argument deltas, so the neutral trio is synthesized
+            // around it. A consumer written against the seam cannot tell the difference, which is the point.
+            var id = "gemini-tool-" + Convert.ToString(index);
+            index = index + 1;
+            yield return new LlmStreamEvent {
+              Kind = LlmStreamEventKind.ToolUseStart, ToolUseId = id, ToolName = part.FunctionCall.Name ?? "",
+            };
+            yield return new LlmStreamEvent {
+              Kind = LlmStreamEventKind.ToolInputDelta, ToolUseId = id, InputDelta = part.FunctionCall.Args ?? "{}",
+            };
+            yield return new LlmStreamEvent { Kind = LlmStreamEventKind.ToolUseEnd, ToolUseId = id };
+          }
+        }
+
+        if (candidate != null && candidate.FinishReason != null) {
+          stopReason = Stopped(candidate.FinishReason, wantsTools);
+        }
+      }
+    }
+
+    // ⛔ THE LAST EVENT OF EVERY STREAM, whatever the stream did — it is what the platform meters from.
+    yield return new LlmStreamEvent {
+      Kind = LlmStreamEventKind.MessageComplete,
+      StopReason = wantsTools ? LlmStopReason.ToolUse : stopReason,
+      InputTokens = inputTokens,
+      OutputTokens = outputTokens,
+      CacheCreationTokens = 0,
+      CacheReadTokens = cached,
+    };
+  }
+
+  // ── the wire ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  /// ⚠ THE MODEL TRAVELS IN THE PATH, not the body — the one shape difference that reaches the URL. A caller may
+  /// already have prefixed it (`models/gemini-2.5-flash`), so the prefix is normalised rather than doubled.
+  string Endpoint(string model, string method) {
+    var bare = model.StartsWith("models/") ? model.Substring("models/".Length) : model;
+    return BaseUrl + "/" + ApiVersion + "/models/" + bare + ":" + method;
+  }
+
+  Dictionary<string, string> Headers(bool streaming) {
+    if (ApiKey == "") {
+      throw new ExternalServiceException("GeminiClient has no ApiKey — set it where the client is registered: "
+        + "`Client = new GeminiClient { ApiKey = Secret.YourKey }`.");
+    }
+    var headers = new Dictionary<string, string>();
+    headers.Add("x-goog-api-key", ApiKey);
+    headers.Add("accept", streaming ? "text/event-stream" : "application/json");
+    return headers;
+  }
+
+  /// ⭐ A TYPED BODY, and the ignore condition is why: `system_instruction`, `tools` and each of the three generation
+  /// settings must be ABSENT rather than null when they do not apply, and they are independent axes — which as
+  /// anonymous objects is one body written many times over. `DefaultIgnoreCondition = WhenWritingNull` says it once.
+  /// ⚑ The CONTENTS stay anonymous objects, because a part is heterogeneous rather than optional: text, inline bytes,
+  /// a function call and a function response are four shapes sharing one position.
+  Json Body(LlmRequest request) {
+    var body = new GeminiRequest {
+      Contents = Contents(request),
+      GenerationConfig = new GeminiGenerationConfig {
+        Temperature = request.Temperature,
+        TopP = request.TopP,
+        MaxOutputTokens = request.MaxTokens ?? MaxTokens,
+      },
+    };
+
+    var system = SystemText(request);
+    if (system != "") {
+      List<Json> parts = [];
+      parts.Add(new { text = system });
+      body.SystemInstruction = new { parts = parts };
+    }
+
+    if (request.Tools.Count > 0) {
+      List<Json> declared = [];
+      foreach (var t in request.Tools) {
+        // The schema arrives as JSON TEXT the app did not author, so it is nested as a document rather than quoted.
+        Json schema = t.InputSchemaJson;
+        declared.Add(new { name = t.Name, description = t.Description, parameters = schema });
+      }
+      // ⚠ ONE tool object holding every declaration — Gemini's shape, not one object per tool.
+      List<Json> tools = [];
+      tools.Add(new { functionDeclarations = declared });
+      body.Tools = tools;
+    }
+
+    return JsonSerializer.Serialize(body,
+      new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
+  }
+
+  List<Json> Contents(LlmRequest request) {
+    var names = ToolNames(request);
+    List<Json> all = [];
+    foreach (var m in request.Messages) {
+      List<Json> parts = [];
+      foreach (var b in m.Content) {
+        if (b.Kind == LlmBlockKind.Text) {
+          parts.Add(new { text = b.Text ?? "" });
+        } else if (b.Kind == LlmBlockKind.Image) {
+          parts.Add(new { inlineData = new { mimeType = b.MediaType ?? "", data = b.DataBase64 ?? "" } });
+        } else if (b.Kind == LlmBlockKind.ToolUse) {
+          Json arguments = b.InputJson == null || b.InputJson == "" ? "{}" : b.InputJson;
+          parts.Add(new { functionCall = new { name = b.ToolName ?? "", args = arguments } });
+        } else if (b.Kind == LlmBlockKind.ToolResult) {
+          // ⚠ KEYED BY THE FUNCTION'S NAME, because Gemini has no call id to key by — so the name is recovered from
+          // the assistant turn that asked for it. Falling back to the id keeps a malformed conversation legible
+          // rather than sending an empty name.
+          var id = b.ToolUseId ?? "";
+          parts.Add(new { functionResponse = new { name = names.GetValueOrDefault(id, id), response = Wrapped(b.ResultJson) } });
+        }
+      }
+      if (parts.Count > 0) {
+        // Gemini's roles: the neutral "assistant" is "model", and a tool result rides under "user".
+        all.Add(new { role = m.Role == "assistant" ? "model" : "user", parts = parts });
+      }
+    }
+    return all;
+  }
+
+  /// Which function each tool-call id asked for, read from the assistant turns that asked.
+  Dictionary<string, string> ToolNames(LlmRequest request) {
+    var names = new Dictionary<string, string>();
+    foreach (var m in request.Messages) {
+      foreach (var b in m.Content) {
+        if (b.Kind == LlmBlockKind.ToolUse) {
+          var id = b.ToolUseId ?? "";
+          if (id != "" && !names.ContainsKey(id)) { names.Add(id, b.ToolName ?? ""); }
+        }
+      }
+    }
+    return names;
+  }
+
+  /// A tool result as Gemini requires it: an OBJECT.
+  /// ⚑ A tool that answered an object is passed through; anything else is wrapped under `result`. An array is wrapped
+  /// as the array it is, and anything that is not JSON at all — a number, a sentence — is wrapped as a STRING, which is
+  /// the honest reading: splicing it as a document would fail the whole call on text that only looked like JSON.
+  Json Wrapped(string? resultJson) {
+    var text = resultJson == null ? "" : resultJson.Trim();
+    if (text.StartsWith("{")) { Json document = text; return document; }
+    if (text.StartsWith("[")) { Json array = text; return new { result = array }; }
+    return new { result = text };
+  }
+
+  /// The system prompt as ONE string. Gemini takes no cache breakpoints, so the structured segments join in order —
+  /// the stability hints are hints, and a provider that cannot act on them is correct to ignore them.
+  string SystemText(LlmRequest request) {
+    if (request.SystemSegments.Count == 0) { return request.SystemPrompt ?? ""; }
+    var joined = "";
+    foreach (var segment in request.SystemSegments) {
+      joined = joined == "" ? segment.Content : joined + "\n\n" + segment.Content;
+    }
+    return joined;
+  }
+
+  int Prompt(GeminiUsage? usage) { return usage == null ? 0 : usage.PromptTokenCount; }
+
+  /// The cached part of the prompt, which Gemini counts INSIDE `promptTokenCount`.
+  /// ⛔ WHICH IS WHY THE CALLER SUBTRACTS IT, AND THE C# ADAPTER DID NOT. Reporting the whole prompt as the input count
+  /// AND the cached count beside it charges the cached prefix twice — once at the input rate and again at the
+  /// cache-read rate. The two together must add up to what Gemini billed as the prompt.
+  int Cached(GeminiUsage? usage) {
+    if (usage == null) { return 0; }
+    // Defensive, not decorative: a cached count above the prompt count would report a NEGATIVE input count, and the
+    // meter would take it.
+    return usage.CachedContentTokenCount > usage.PromptTokenCount ? 0 : usage.CachedContentTokenCount;
+  }
+
+  /// ⚠ A FUNCTION CALL WINS OVER THE FINISH REASON. Gemini answers `STOP` on a turn that asked for a tool, so reading
+  /// the reason alone would tell the platform the model was finished while its answer is a tool call waiting to be run.
+  LlmStopReason Stopped(string? reason, bool wantsTools) {
+    if (wantsTools) { return LlmStopReason.ToolUse; }
+    if (reason == "MAX_TOKENS") { return LlmStopReason.MaxTokens; }
+    return LlmStopReason.EndTurn;
+  }
+
+  List<GeminiPart> Parts(GeminiCandidate? candidate) {
+    if (candidate == null) { return []; }
+    var content = candidate.Content;
+    if (content == null || content.Parts == null) { return []; }
+    return content.Parts;
+  }
+
+  string Failure(int status, string body) {
+    return "Gemini answered " + Convert.ToString(status) + ": " + body;
+  }
+}

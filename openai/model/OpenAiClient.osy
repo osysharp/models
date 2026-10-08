@@ -1,0 +1,303 @@
+namespace Osysharp.Models.OpenAi;
+
+using Osysharp.Http;
+using Osysharp.Llm;
+
+/// The OpenAI Chat Completions API as an `ILlmClient`. Register it on the model it serves:
+///
+///   app.Models = [
+///     new LlmConfig("Fast")   { Client = new OpenAiClient { ApiKey = Secret.OpenAi }, Model = "gpt-4o-mini" },
+///     new LlmConfig("Strong") { Client = new OpenAiClient { ApiKey = Secret.OpenAi }, Model = "gpt-4o" },
+///   ];
+///
+/// ⭐ AND IT SERVES ANY ENDPOINT THAT SPEAKS THE SAME WIRE — vLLM, llama.cpp, OpenRouter, your own gateway:
+///
+///   new LlmConfig("Local") { Client = new OpenAiClient { ApiKey = Secret.Local, BaseUrl = "http://vllm.internal:8000",
+///                                                        LegacyMaxTokens = true }, Model = "llama-3.3-70b" }
+///
+/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's `ILlmRouter`; this serves what
+/// it is given. A provider that second-guessed the decision would make every routing policy advisory.
+///
+/// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
+/// happen above the seam, from the token counts reported here — so report what OpenAI reported, never an estimate.
+public class OpenAiClient : ILlmClient {
+  /// The API key. Declared where the client is registered, so the app names its own secret:
+  /// `Client = new OpenAiClient { ApiKey = Secret.OpenAi }`.
+  public string ApiKey = "";
+  /// The API root. OpenAI's own unless you are pointing this at an endpoint that speaks the same wire.
+  public string BaseUrl = "https://api.openai.com";
+  /// What to ask for when the request does not say.
+  /// ⚑ OpenAI does not REQUIRE a bound, and this sends one anyway: an unbounded answer is an unbounded bill. Raise it,
+  /// or set `MaxTokens` on the request, which wins.
+  public int MaxTokens = 4096;
+  /// Send the legacy `max_tokens` instead of `max_completion_tokens`.
+  /// ⚠ FALSE for OpenAI itself — the reasoning models REFUSE `max_tokens` outright ("Unsupported parameter"). TRUE for
+  /// most OpenAI-compatible servers, which only ever implemented the legacy field. Exactly one is ever sent, because a
+  /// server that rejects unknown fields fails the whole call on the other one.
+  public bool LegacyMaxTokens = false;
+
+  public LlmResponse Complete(LlmRequest request) {
+    var r = Http.Post(BaseUrl + "/v1/chat/completions", Body(request, false), "application/json", Headers(false));
+    if (!r.IsSuccess) { throw new ExternalServiceException(Failure(r.StatusCode, r.Body)); }
+
+    var answer = JsonSerializer.Deserialize<OpenAiChatResponse>(r.Body);
+    var choice = answer.Choices.FirstOrDefault();
+    var message = choice == null ? null : choice.Message;
+
+    List<LlmContentBlock> content = [];
+    if (message != null && message.Content != null && message.Content != "") {
+      content.Add(new LlmContentBlock { Kind = LlmBlockKind.Text, Text = message.Content });
+    }
+    if (message != null && message.ToolCalls != null) {
+      foreach (var call in message.ToolCalls) {
+        content.Add(new LlmContentBlock {
+          Kind = LlmBlockKind.ToolUse,
+          ToolUseId = call.Id ?? "",
+          ToolName = call.Function == null ? "" : (call.Function.Name ?? ""),
+          // ⚠ OPENAI'S `arguments` IS A JSON *STRING*, not a document — the opposite of Anthropic's `input`. So it is
+          // carried as text in both directions, and the seam's `InputJson` is exactly what it holds.
+          InputJson = Arguments(call),
+        });
+      }
+    }
+
+    var usage = answer.Usage;
+    var cached = Cached(usage);
+    return new LlmResponse {
+      Content = content,
+      StopReason = Stopped(choice == null ? null : choice.FinishReason, content),
+      InputTokens = Prompt(usage) - cached,
+      OutputTokens = usage == null ? 0 : usage.CompletionTokens,
+      // OpenAI has no cache-WRITE charge: a prefix is cached automatically, and only reading it is priced.
+      CacheCreationTokens = 0,
+      CacheReadTokens = cached,
+    };
+  }
+
+  /// The answer as it is written. OpenAI streams tool calls as INDEXED deltas — the first delta for an index carries
+  /// the id and the function name, later ones append `arguments` — so the ids are remembered per index and one
+  /// `ToolUseStart` is emitted per call, with its arguments after it.
+  public stream<LlmStreamEvent> Stream(LlmRequest request) {
+    var announced = new Dictionary<int, string>();
+    var inputTokens = 0;
+    var outputTokens = 0;
+    var cached = 0;
+    var stopReason = LlmStopReason.EndTurn;
+    var sawToolCall = false;
+
+    foreach (var frame in Http.StreamEvents(BaseUrl + "/v1/chat/completions", Body(request, true),
+                                            "application/json", Headers(true))) {
+      // The stream ends with a literal `[DONE]`, and a server may send a keep-alive comment. Neither is JSON, and
+      // handing either to the deserializer would fail the call on its last frame.
+      if (frame.StartsWith("{")) {
+        var chunk = JsonSerializer.Deserialize<OpenAiStreamChunk>(frame);
+
+        // Usage arrives on the FINAL chunk (`stream_options.include_usage`), whose `choices` is empty.
+        if (chunk.Usage != null) {
+          cached = Cached(chunk.Usage);
+          inputTokens = chunk.Usage.PromptTokens - cached;
+          outputTokens = chunk.Usage.CompletionTokens;
+        }
+
+        var choice = chunk.Choices == null ? null : chunk.Choices.FirstOrDefault();
+        var delta = choice == null ? null : choice.Delta;
+        if (delta != null && delta.Content != null && delta.Content != "") {
+          yield return new LlmStreamEvent { Kind = LlmStreamEventKind.TextDelta, Delta = delta.Content };
+        }
+        if (delta != null && delta.ToolCalls != null) {
+          foreach (var call in delta.ToolCalls) {
+            var index = call.Index ?? 0;
+            if (!announced.ContainsKey(index)) {
+              announced.Add(index, call.Id ?? "");
+              sawToolCall = true;
+              yield return new LlmStreamEvent {
+                Kind = LlmStreamEventKind.ToolUseStart,
+                ToolUseId = call.Id ?? "",
+                ToolName = call.Function == null ? "" : (call.Function.Name ?? ""),
+              };
+            }
+            var arguments = call.Function == null ? null : call.Function.Arguments;
+            if (arguments != null && arguments != "") {
+              yield return new LlmStreamEvent {
+                Kind = LlmStreamEventKind.ToolInputDelta,
+                ToolUseId = announced.GetValueOrDefault(index, ""),
+                InputDelta = arguments,
+              };
+            }
+          }
+        }
+        if (choice != null && choice.FinishReason != null) {
+          stopReason = Finished(choice.FinishReason, sawToolCall);
+          foreach (var id in announced.Values) {
+            yield return new LlmStreamEvent { Kind = LlmStreamEventKind.ToolUseEnd, ToolUseId = id };
+          }
+        }
+      }
+    }
+
+    // ⛔ ALWAYS, AND THE C# ADAPTER THIS REPLACES DID NOT. It emitted the final event only `if (sawFinish)`, so a
+    //    stream cut short — the connection dropped, the server stopped mid-answer — produced no `MessageComplete` at
+    //    all, and the seam says that is a call the platform cannot meter. Whatever counts are in hand is the answer.
+    yield return new LlmStreamEvent {
+      Kind = LlmStreamEventKind.MessageComplete,
+      StopReason = stopReason,
+      InputTokens = inputTokens,
+      OutputTokens = outputTokens,
+      CacheCreationTokens = 0,
+      CacheReadTokens = cached,
+    };
+  }
+
+  // ── the wire ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Dictionary<string, string> Headers(bool streaming) {
+    if (ApiKey == "") {
+      throw new ExternalServiceException("OpenAiClient has no ApiKey — set it where the client is registered: "
+        + "`Client = new OpenAiClient { ApiKey = Secret.YourKey }`.");
+    }
+    var headers = new Dictionary<string, string>();
+    headers.Add("authorization", "Bearer " + ApiKey);
+    headers.Add("accept", streaming ? "text/event-stream" : "application/json");
+    return headers;
+  }
+
+  /// ⭐ A TYPED BODY, AND THE IGNORE CONDITION IS WHY. Three of its keys must be ABSENT rather than null — the
+  /// max-tokens field the other spelling of which is refused, `stream_options` (only legal beside `stream: true`), and
+  /// `tools`, which OpenAI refuses as an empty array — and each is an INDEPENDENT axis. Written as anonymous objects
+  /// that would be eight copies of one body; `DefaultIgnoreCondition = WhenWritingNull` says it once.
+  /// ⚑ The MESSAGES stay anonymous objects, because they are heterogeneous rather than optional: a text turn, an image
+  /// turn and a tool result are three shapes, and a class per shape would say nothing the shape does not.
+  Json Body(LlmRequest request, bool streaming) {
+    var body = new OpenAiChatRequest {
+      Model = request.Model,
+      Messages = Messages(request),
+      Temperature = request.Temperature,
+      TopP = request.TopP,
+    };
+
+    var max = request.MaxTokens ?? MaxTokens;
+    if (LegacyMaxTokens) { body.MaxTokens = max; } else { body.MaxCompletionTokens = max; }
+
+    if (request.Tools.Count > 0) { body.Tools = Tools(request); }
+    if (streaming) {
+      body.Stream = true;
+      body.StreamOptions = new OpenAiStreamOptions { IncludeUsage = true };
+    }
+
+    return JsonSerializer.Serialize(body,
+      new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
+  }
+
+  /// The conversation as OpenAI wants it: the system prompt as its own first message, an assistant turn's tool calls
+  /// as `tool_calls` on that turn, and each tool RESULT as its own `role: "tool"` message.
+  List<Json> Messages(LlmRequest request) {
+    List<Json> all = [];
+
+    var system = SystemText(request);
+    if (system != "") { all.Add(new { role = "system", content = system }); }
+
+    foreach (var m in request.Messages) {
+      var text = "";
+      List<Json> images = [];
+      List<Json> toolCalls = [];
+      List<Json> results = [];
+
+      foreach (var b in m.Content) {
+        if (b.Kind == LlmBlockKind.Text) {
+          text = text + (b.Text ?? "");
+        } else if (b.Kind == LlmBlockKind.Image) {
+          // OpenAI takes the bytes as a data: URL rather than a media type beside them.
+          images.Add(new { type = "image_url",
+                           image_url = new { url = "data:" + (b.MediaType ?? "") + ";base64," + (b.DataBase64 ?? "") } });
+        } else if (b.Kind == LlmBlockKind.ToolUse) {
+          toolCalls.Add(new { id = b.ToolUseId ?? "", type = "function",
+                              function = new { name = b.ToolName ?? "", arguments = b.InputJson ?? "{}" } });
+        } else if (b.Kind == LlmBlockKind.ToolResult) {
+          results.Add(new { role = "tool", tool_call_id = b.ToolUseId ?? "", content = b.ResultJson ?? "" });
+        }
+      }
+
+      if (toolCalls.Count > 0) {
+        // An assistant turn that called tools may have no words of its own, and `content` is then left out rather
+        // than sent empty.
+        if (text != "") { all.Add(new { role = m.Role, content = text, tool_calls = toolCalls }); }
+        else { all.Add(new { role = m.Role, tool_calls = toolCalls }); }
+      } else if (images.Count > 0) {
+        // A turn carrying an image writes `content` as an ARRAY of parts — text first, so the instruction is read
+        // before what it is about.
+        List<Json> parts = [];
+        if (text != "") { parts.Add(new { type = "text", text = text }); }
+        foreach (var image in images) { parts.Add(image); }
+        all.Add(new { role = m.Role, content = parts });
+      } else if (text != "") {
+        all.Add(new { role = m.Role, content = text });
+      }
+
+      // A tool result is always its own message, whatever role the neutral one carried.
+      foreach (var result in results) { all.Add(result); }
+    }
+
+    return all;
+  }
+
+  /// The system prompt as ONE string. OpenAI has no cache breakpoints, so the structured segments simply join in
+  /// order — the stability hints are hints, and a provider that cannot act on them is correct to ignore them.
+  string SystemText(LlmRequest request) {
+    if (request.SystemSegments.Count == 0) { return request.SystemPrompt ?? ""; }
+    var joined = "";
+    foreach (var segment in request.SystemSegments) {
+      joined = joined == "" ? segment.Content : joined + "\n\n" + segment.Content;
+    }
+    return joined;
+  }
+
+  List<Json> Tools(LlmRequest request) {
+    List<Json> tools = [];
+    foreach (var t in request.Tools) {
+      // The schema arrives as JSON TEXT the app did not author, so it is nested as a document rather than quoted.
+      Json schema = t.InputSchemaJson;
+      tools.Add(new { type = "function",
+                      function = new { name = t.Name, description = t.Description, parameters = schema } });
+    }
+    return tools;
+  }
+
+  /// A tool call's arguments, never the empty string: OpenAI sends `""` for a call with no arguments, and `{}` is what
+  /// every consumer of the seam can actually parse.
+  string Arguments(OpenAiToolCall call) {
+    var arguments = call.Function == null ? null : call.Function.Arguments;
+    return arguments == null || arguments == "" ? "{}" : arguments;
+  }
+
+  int Prompt(OpenAiUsage? usage) { return usage == null ? 0 : usage.PromptTokens; }
+
+  /// The cached part of the prompt, which OpenAI counts INSIDE `prompt_tokens`.
+  /// ⛔ WHICH IS WHY THE CALLER SUBTRACTS IT, AND THE C# ADAPTER DID NOT. Reporting `prompt_tokens` as the input count
+  /// AND `cached_tokens` beside it charges the cached prefix twice — once at the full input rate and again at the
+  /// cache-read rate. The two together must add up to what OpenAI billed as the prompt.
+  int Cached(OpenAiUsage? usage) {
+    if (usage == null) { return 0; }
+    var details = usage.PromptTokensDetails;
+    var cached = details == null ? 0 : details.CachedTokens;
+    // Defensive, not decorative: if a compatible server ever reports a cached count above its own prompt count,
+    // subtracting would report a NEGATIVE input count and the meter would take it.
+    return cached > usage.PromptTokens ? 0 : cached;
+  }
+
+  LlmStopReason Stopped(string? reason, List<LlmContentBlock> content) {
+    var wantsTools = false;
+    foreach (var b in content) { if (b.Kind == LlmBlockKind.ToolUse) { wantsTools = true; } }
+    return Finished(reason, wantsTools);
+  }
+
+  LlmStopReason Finished(string? reason, bool wantsTools) {
+    if (reason == "tool_calls" || reason == "function_call") { return LlmStopReason.ToolUse; }
+    if (reason == "length") { return LlmStopReason.MaxTokens; }
+    if (reason == "stop" && wantsTools) { return LlmStopReason.ToolUse; }
+    return LlmStopReason.EndTurn;
+  }
+
+  string Failure(int status, string body) {
+    return "OpenAI answered " + Convert.ToString(status) + ": " + body;
+  }
+}

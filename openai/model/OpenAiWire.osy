@@ -1,0 +1,87 @@
+// The OpenAI Chat Completions API on the wire. Its names are snake_case, so each field says its own external name —
+// the class names stay Osy#'s and the JSON stays OpenAI's.
+namespace Osysharp.Models.OpenAi;
+
+// ⭐ THE REQUEST IS TYPED HERE, AND THAT IS THE DIFFERENCE FROM `Osysharp.Models.Anthropic`. Three of its keys must be ABSENT
+// rather than null — exactly one of `max_completion_tokens`/`max_tokens`, `stream_options` only beside `stream: true`,
+// and `tools`, which OpenAI refuses as an empty array — and the three are independent, so the anonymous form would be
+// EIGHT copies of one body. `JsonSerializer.Serialize(body, new JsonSerializerOptions { DefaultIgnoreCondition =
+// WhenWritingNull })` says it once, which is also what a C# author writes.
+//
+// The MESSAGES are still anonymous objects (`List<Json>` below) because they are heterogeneous rather than optional:
+// a text turn, an image turn, a tool call and a tool result are four shapes, and a class per shape would add names
+// without adding meaning.
+
+/// What goes UP. Every nullable member is one OpenAI must not see when it does not apply.
+public class OpenAiChatRequest {
+  [ExternalName("model")] public string Model = "";
+  [ExternalName("messages")] public List<Json> Messages = [];
+  /// Absent when the app declared no tools: OpenAI refuses `"tools": []`.
+  [ExternalName("tools")] public List<Json>? Tools;
+  /// Exactly ONE of these two is ever set — see `OpenAiClient.LegacyMaxTokens`.
+  [ExternalName("max_completion_tokens")] public int? MaxCompletionTokens;
+  [ExternalName("max_tokens")] public int? MaxTokens;
+  [ExternalName("temperature")] public decimal? Temperature;
+  [ExternalName("top_p")] public decimal? TopP;
+  /// Set only when streaming. `stream_options` is legal only beside it.
+  [ExternalName("stream")] public bool? Stream;
+  [ExternalName("stream_options")] public OpenAiStreamOptions? StreamOptions;
+}
+
+/// ⚠ `include_usage` IS WHAT MAKES A STREAM METERABLE. Without it the token counts never arrive, and the last event of
+/// the stream — the one the platform bills from — carries zeros.
+public class OpenAiStreamOptions {
+  [ExternalName("include_usage")] public bool IncludeUsage = true;
+}
+
+/// What comes back from a non-streaming call.
+public class OpenAiChatResponse {
+  [ExternalName("choices")] public List<OpenAiChoice> Choices = [];
+  [ExternalName("usage")] public OpenAiUsage? Usage;
+}
+
+/// One choice. A non-streaming answer fills `message`; a streamed chunk fills `delta` — one class, because they are the
+/// same position in the same envelope.
+public class OpenAiChoice {
+  [ExternalName("message")] public OpenAiResponseMessage? Message;
+  [ExternalName("delta")] public OpenAiResponseMessage? Delta;
+  [ExternalName("finish_reason")] public string? FinishReason;
+}
+
+public class OpenAiResponseMessage {
+  [ExternalName("content")] public string? Content;
+  [ExternalName("tool_calls")] public List<OpenAiToolCall>? ToolCalls;
+}
+
+/// One tool call. ⚠ In a STREAM only the first delta for an `index` carries `id` and `function.name`; the ones after it
+/// carry only more `arguments`. That is why the client remembers the id per index.
+public class OpenAiToolCall {
+  [ExternalName("index")] public int? Index;
+  [ExternalName("id")] public string? Id;
+  [ExternalName("function")] public OpenAiToolCallFunction? Function;
+}
+
+/// ⚠ `arguments` IS JSON *TEXT*, not a document — OpenAI's own shape, and the opposite of Anthropic's `input`. It is
+/// carried as text in both directions, which is exactly what the seam's `InputJson` holds.
+public class OpenAiToolCallFunction {
+  [ExternalName("name")] public string? Name;
+  [ExternalName("arguments")] public string? Arguments;
+}
+
+/// The token counts. ⚠ The platform meters from these, and `prompt_tokens` INCLUDES the cached prefix — see
+/// `OpenAiClient.Cached`, which is why the client subtracts it rather than reporting both.
+public class OpenAiUsage {
+  [ExternalName("prompt_tokens")] public int PromptTokens;
+  [ExternalName("completion_tokens")] public int CompletionTokens;
+  [ExternalName("prompt_tokens_details")] public OpenAiPromptTokensDetails? PromptTokensDetails;
+}
+
+public class OpenAiPromptTokensDetails {
+  [ExternalName("cached_tokens")] public int CachedTokens;
+}
+
+/// One chunk of a streamed answer. The final chunk carries `usage` and no choices.
+public class OpenAiStreamChunk {
+  [ExternalName("choices")] public List<OpenAiChoice>? Choices;
+  [ExternalName("usage")] public OpenAiUsage? Usage;
+}

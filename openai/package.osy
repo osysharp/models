@@ -1,0 +1,30 @@
+// Osysharp.Models.OpenAi — the OpenAI Chat Completions API as an `ILlmClient`, written in Osy#.
+//
+// It needs nothing privileged. It is ordinary Osy# using only public APIs — a class implementing the Llm package's
+// `ILlmClient`, building its request with `JsonSerializer` and sending it with `Http.*` — so anyone could have written
+// it exactly as it is, for a provider the platform has never heard of.
+//
+// It asks for one host, and an app that uses it grants it or does not compile. It asks for no SECRET: the API key is a
+// setting on the registration, so the app names its own secret (`Client = new OpenAiClient { ApiKey = Secret.Mine }`)
+// and this package never learns which.
+//
+// ⚑ AND THE SAME CLASS SERVES ANY ENDPOINT THAT SPEAKS THIS WIRE — vLLM, llama.cpp, OpenRouter, a gateway of your own:
+// point `BaseUrl` at it and set `LegacyMaxTokens = true`. That pair is the whole of what the platform's deleted
+// `LlmProvider.OpenAICompatible` enum member ever meant. ⚠ Your host is YOUR choice, so this manifest cannot NAME it —
+// it declares `egress consumer;` instead, which says "a host you choose" without naming one. Grant your host on the
+// `use` (see the README); your grant is the only thing that names it, and it is the only authority.
+package Osysharp.Models.OpenAi {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "the OpenAI Chat Completions API as an app.Models `Client` — and any endpoint that speaks its wire.";
+
+  model "model/*.osy";
+  use Osysharp.Http;
+  use Osysharp.Llm;
+
+  egress "api.openai.com";
+  // A host the CONSUMER names — this class serves any OpenAI-wire endpoint, so an app pointing `BaseUrl` at its own
+  // gateway grants a host no manifest could have known. Without this line that grant was reported UNUSED, telling the
+  // author to delete the one line their app cannot work without.
+  egress consumer;
+}

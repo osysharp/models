@@ -1,0 +1,82 @@
+// The Anthropic Messages API on the wire. Its names are snake_case, so each field says its own external name — the
+// class names stay Osy#'s and the JSON stays Anthropic's.
+namespace Osysharp.Models.Anthropic;
+
+// ⭐ THE REQUEST IS TYPED, and the ignore condition is what makes it possible. Three of its keys must be ABSENT rather
+// than null — `temperature` and `top_p` (the models that removed sampling reject the request when the key is present
+// at ALL, so a null is not a way of leaving them out) and `tools` when the app declared none — and each is an
+// independent axis, which written as anonymous objects is one body copied once per combination.
+// `JsonSerializer.Serialize(body, new JsonSerializerOptions { DefaultIgnoreCondition = WhenWritingNull })` says it
+// once, and it is what a C# author writes.
+//
+// ⚠ THIS KIT DID IT THE OTHER WAY UNTIL 2026-09-20, branching the whole body on `AcceptsSampling`, and the branch was
+// not merely verbose: the sampling arm wrote `"temperature": null` for every request that declared none, which is the
+// key-is-present case the allowlist exists to avoid. A `Json` MEMBER of a class could not be written at all back then
+// (it came out quoted), so the typed form was unavailable; that is fixed, and all three provider kits now share this
+// shape.
+//
+// The MESSAGES stay anonymous objects (`List<Json>` below), because they are heterogeneous rather than optional: a
+// text block, an image, a tool call and a tool result are four shapes sharing one position.
+
+/// What goes UP. Every nullable member is one Anthropic must not see when it does not apply.
+public class AnthropicMessageRequest {
+  [ExternalName("model")] public string Model = "";
+  /// Always the block-array form, even for a plain prompt — see `AnthropicClient.SystemContent`.
+  [ExternalName("system")] public List<Json> System = [];
+  [ExternalName("messages")] public List<Json> Messages = [];
+  /// Absent when the app declared none.
+  [ExternalName("tools")] public List<Json>? Tools;
+  /// ⚠ REQUIRED by Anthropic, so there is always a number.
+  [ExternalName("max_tokens")] public int MaxTokens = 0;
+  [ExternalName("stream")] public bool Stream = false;
+  /// Set only for a model that still accepts sampling parameters — see `AnthropicClient.AcceptsSampling`.
+  [ExternalName("temperature")] public decimal? Temperature;
+  [ExternalName("top_p")] public decimal? TopP;
+}
+
+/// What comes back from a non-streaming call.
+public class AnthropicMessageResponse {
+  [ExternalName("content")] public List<AnthropicBlock> Content = [];
+  [ExternalName("stop_reason")] public string? StopReason;
+  [ExternalName("usage")] public AnthropicUsage? Usage;
+}
+
+/// One block of the answer. `input` is the tool's arguments, handed on as the JSON text it arrived as.
+public class AnthropicBlock {
+  [ExternalName("type")] public string Type = "";
+  [ExternalName("text")] public string? Text;
+  [ExternalName("id")] public string? Id;
+  [ExternalName("name")] public string? Name;
+  [ExternalName("input")] public Json? Input;
+}
+
+/// The token counts. ⚠ The platform meters from these — report what Anthropic reported.
+public class AnthropicUsage {
+  [ExternalName("input_tokens")] public int InputTokens;
+  [ExternalName("output_tokens")] public int OutputTokens;
+  [ExternalName("cache_creation_input_tokens")] public int? CacheCreationInputTokens;
+  [ExternalName("cache_read_input_tokens")] public int? CacheReadInputTokens;
+}
+
+/// One server-sent event of a streamed answer. Every event carries its `type`; the rest of the fields belong to some
+/// of them, which is why they are all nullable.
+public class AnthropicStreamEvent {
+  [ExternalName("type")] public string Type = "";
+  [ExternalName("message")] public AnthropicStreamMessage? Message;
+  [ExternalName("content_block")] public AnthropicBlock? ContentBlock;
+  [ExternalName("delta")] public AnthropicStreamDelta? Delta;
+  [ExternalName("usage")] public AnthropicUsage? Usage;
+  [ExternalName("index")] public int? Index;
+}
+
+public class AnthropicStreamMessage {
+  [ExternalName("usage")] public AnthropicUsage? Usage;
+}
+
+/// The changing part of an event: text as it is written, a tool's arguments as they are written, or the stop reason.
+public class AnthropicStreamDelta {
+  [ExternalName("type")] public string? Type;
+  [ExternalName("text")] public string? Text;
+  [ExternalName("partial_json")] public string? PartialJson;
+  [ExternalName("stop_reason")] public string? StopReason;
+}

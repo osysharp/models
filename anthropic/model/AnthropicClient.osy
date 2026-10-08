@@ -1,0 +1,269 @@
+namespace Osysharp.Models.Anthropic;
+
+using Osysharp.Http;
+using Osysharp.Llm;
+
+/// The Anthropic Messages API as an `ILlmClient`. Register it on the model it serves:
+///
+///   app.Models = [
+///     new LlmConfig("Fast")   { Client = new AnthropicClient { ApiKey = Secret.Anthropic }, Model = "claude-haiku-4-5" },
+///     new LlmConfig("Strong") { Client = new AnthropicClient { ApiKey = Secret.Anthropic }, Model = "claude-sonnet-5" },
+///   ];
+///
+/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's `ILlmRouter`; this serves what
+/// it is given. A provider that second-guessed the decision would make every routing policy advisory.
+///
+/// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
+/// happen above the seam, from the token counts reported here — so report what Anthropic reported, never an estimate.
+public class AnthropicClient : ILlmClient {
+  /// The API key. Declared where the client is registered, so the app names its own secret:
+  /// `Client = new AnthropicClient { ApiKey = Secret.Anthropic }`.
+  public string ApiKey = "";
+  /// The API root. Anthropic's own unless you are pointed at a proxy that speaks the same wire.
+  public string BaseUrl = "https://api.anthropic.com";
+  /// What to ask for when the request does not say. Anthropic REQUIRES `max_tokens`, so there is always a number.
+  public int MaxTokens = 4096;
+
+  public LlmResponse Complete(LlmRequest request) {
+    var r = Http.Post(BaseUrl + "/v1/messages", Body(request, false), "application/json", Headers(false));
+    if (!r.IsSuccess) { throw new ExternalServiceException(Failure(r.StatusCode, r.Body)); }
+
+    var answer = JsonSerializer.Deserialize<AnthropicMessageResponse>(r.Body);
+    List<LlmContentBlock> content = [];
+    foreach (var block in answer.Content) {
+      if (block.Type == "text") {
+        content.Add(new LlmContentBlock { Kind = LlmBlockKind.Text, Text = block.Text ?? "" });
+      } else if (block.Type == "tool_use") {
+        content.Add(new LlmContentBlock {
+          Kind = LlmBlockKind.ToolUse,
+          ToolUseId = block.Id ?? "",
+          ToolName = block.Name ?? "",
+          // A `Json` value IS its own text, so this is the text — NOT `JsonSerializer.Serialize`, which would
+          // encode a document a second time and hand the caller a JSON string of escaped JSON.
+          InputJson = block.Input ?? "{}",
+        });
+      }
+    }
+
+    var usage = answer.Usage;
+    return new LlmResponse {
+      Content = content,
+      StopReason = Stopped(answer.StopReason),
+      InputTokens = usage == null ? 0 : usage.InputTokens,
+      OutputTokens = usage == null ? 0 : usage.OutputTokens,
+      CacheCreationTokens = usage == null ? 0 : (usage.CacheCreationInputTokens ?? 0),
+      CacheReadTokens = usage == null ? 0 : (usage.CacheReadInputTokens ?? 0),
+    };
+  }
+
+  /// The answer as it is written. Anthropic reports the INPUT counts on `message_start` and the OUTPUT count on
+  /// `message_delta`, so both are carried across the loop and sent together in the one `MessageComplete` the
+  /// platform meters from.
+  public stream<LlmStreamEvent> Stream(LlmRequest request) {
+    var inputTokens = 0;
+    var outputTokens = 0;
+    var cacheCreation = 0;
+    var cacheRead = 0;
+    var toolUseId = "";
+
+    foreach (var frame in Http.StreamEvents(BaseUrl + "/v1/messages", Body(request, true), "application/json", Headers(true))) {
+      var e = JsonSerializer.Deserialize<AnthropicStreamEvent>(frame);
+
+      if (e.Type == "message_start") {
+        var start = e.Message == null ? null : e.Message.Usage;
+        if (start != null) {
+          inputTokens = start.InputTokens;
+          cacheCreation = start.CacheCreationInputTokens ?? 0;
+          cacheRead = start.CacheReadInputTokens ?? 0;
+        }
+      } else if (e.Type == "content_block_start") {
+        var opened = e.ContentBlock;
+        if (opened != null && opened.Type == "tool_use") {
+          toolUseId = opened.Id ?? "";
+          yield return new LlmStreamEvent {
+            Kind = LlmStreamEventKind.ToolUseStart, ToolUseId = toolUseId, ToolName = opened.Name ?? "",
+          };
+        }
+      } else if (e.Type == "content_block_delta") {
+        var delta = e.Delta;
+        if (delta != null && delta.Type == "text_delta") {
+          yield return new LlmStreamEvent { Kind = LlmStreamEventKind.TextDelta, Delta = delta.Text ?? "" };
+        } else if (delta != null && delta.Type == "input_json_delta") {
+          // The id comes from the block that OPENED, not from the delta — Anthropic does not repeat it, and an
+          // empty id here is a tool call the consumer cannot attach its arguments to.
+          yield return new LlmStreamEvent {
+            Kind = LlmStreamEventKind.ToolInputDelta, ToolUseId = toolUseId, InputDelta = delta.PartialJson ?? "",
+          };
+        }
+      } else if (e.Type == "content_block_stop") {
+        if (toolUseId != "") {
+          yield return new LlmStreamEvent { Kind = LlmStreamEventKind.ToolUseEnd, ToolUseId = toolUseId };
+          toolUseId = "";
+        }
+      } else if (e.Type == "message_delta") {
+        if (e.Usage != null) { outputTokens = e.Usage.OutputTokens; }
+        var ending = e.Delta;
+        if (ending != null && ending.StopReason != null) {
+          yield return new LlmStreamEvent {
+            Kind = LlmStreamEventKind.MessageComplete,
+            StopReason = Stopped(ending.StopReason),
+            InputTokens = inputTokens,
+            OutputTokens = outputTokens,
+            CacheCreationTokens = cacheCreation,
+            CacheReadTokens = cacheRead,
+          };
+        }
+      }
+    }
+  }
+
+  // ── the wire ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Dictionary<string, string> Headers(bool streaming) {
+    if (ApiKey == "") {
+      throw new ExternalServiceException("AnthropicClient has no ApiKey — set it where the client is registered: "
+        + "`Client = new AnthropicClient { ApiKey = Secret.YourKey }`.");
+    }
+    var headers = new Dictionary<string, string>();
+    headers.Add("x-api-key", ApiKey);
+    headers.Add("anthropic-version", "2023-06-01");
+    headers.Add("accept", streaming ? "text/event-stream" : "application/json");
+    return headers;
+  }
+
+  /// ⭐ A TYPED BODY, and the ignore condition is why — `temperature`, `top_p` and `tools` must each be ABSENT rather
+  /// than null when they do not apply, and they are independent axes. See the note at the top of `AnthropicWire.osy`:
+  /// this was four hand-written shapes until 2026-09-20, and the sampling one sent `"temperature": null`.
+  Json Body(LlmRequest request, bool streaming) {
+    List<Json> messages = [];
+    foreach (var m in request.Messages) { messages.Add(Message(m)); }
+
+    var body = new AnthropicMessageRequest {
+      Model = request.Model,
+      System = SystemContent(request),
+      Messages = messages,
+      MaxTokens = request.MaxTokens ?? MaxTokens,
+      Stream = streaming,
+    };
+
+    if (request.Tools.Count > 0) {
+      List<Json> declared = [];
+      var index = 0;
+      foreach (var t in request.Tools) {
+        // The cache breakpoint goes on the LAST tool, which is what caches the whole block of them.
+        var cacheThis = request.CacheTools && index == request.Tools.Count - 1;
+        // The schema arrives as JSON TEXT the app did not author, so it is nested as a document rather than quoted.
+        Json schema = t.InputSchemaJson;
+        if (cacheThis) {
+          declared.Add(new { name = t.Name, description = t.Description, input_schema = schema,
+                             cache_control = new { type = "ephemeral" } });
+        } else {
+          declared.Add(new { name = t.Name, description = t.Description, input_schema = schema });
+        }
+        index = index + 1;
+      }
+      body.Tools = declared;
+    }
+
+    // ⚠ ONLY FOR A MODEL THAT STILL TAKES THEM. A model that removed sampling rejects the request when the key is
+    //    present at all, so this is the one axis the ignore condition cannot decide: a null means "not asked for",
+    //    and a declared value on a model that refuses it is a 400 the app asked for.
+    if (AcceptsSampling(request.Model)) {
+      body.Temperature = request.Temperature;
+      body.TopP = request.TopP;
+    }
+
+    return JsonSerializer.Serialize(body,
+      new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
+  }
+
+  Json Message(LlmMessage message) {
+    List<Json> content = [];
+    var index = 0;
+    foreach (var b in message.Content) {
+      var last = index == message.Content.Count - 1;
+      if (b.Kind == LlmBlockKind.Text) {
+        if (message.CacheBreakpoint && last) {
+          content.Add(new { type = "text", text = b.Text ?? "", cache_control = new { type = "ephemeral" } });
+        } else {
+          content.Add(new { type = "text", text = b.Text ?? "" });
+        }
+      } else if (b.Kind == LlmBlockKind.Image) {
+        content.Add(new { type = "image",
+                          source = new { type = "base64", media_type = b.MediaType ?? "", data = b.DataBase64 ?? "" } });
+      } else if (b.Kind == LlmBlockKind.ToolUse) {
+        Json arguments = b.InputJson ?? "{}";
+        content.Add(new { type = "tool_use", id = b.ToolUseId ?? "", name = b.ToolName ?? "",
+                          input = arguments });
+      } else if (b.Kind == LlmBlockKind.ToolResult) {
+        if (b.IsError) {
+          content.Add(new { type = "tool_result", tool_use_id = b.ToolUseId ?? "",
+                            content = b.ResultJson ?? "", is_error = true });
+        } else {
+          content.Add(new { type = "tool_result", tool_use_id = b.ToolUseId ?? "", content = b.ResultJson ?? "" });
+        }
+      }
+      index = index + 1;
+    }
+    return new { role = message.Role, content = content };
+  }
+
+  /// The system prompt. `SystemSegments` wins when it is set — that is the seam's rule — and a breakpoint is placed at
+  /// the end of each CACHEABLE stability tier once enough has accumulated to be worth caching. Anthropic will not
+  /// cache a prefix below its minimum, so a breakpoint placed too early is a request that fails rather than one that
+  /// merely misses.
+  /// ⚑ ALWAYS THE BLOCK-ARRAY FORM, even for a plain prompt. Anthropic accepts `system` either as a string or as an
+  /// array of text blocks, and using one shape for both means the key has ONE type — where two would need the request
+  /// body branched again, on an axis that changes nothing about the call.
+  List<Json> SystemContent(LlmRequest request) {
+    List<Json> blocks = [];
+    if (request.SystemSegments.Count == 0) {
+      if (request.SystemPrompt != null) { blocks.Add(new { type = "text", text = request.SystemPrompt }); }
+      return blocks;
+    }
+
+    var accumulated = 0;
+    var index = 0;
+    foreach (var segment in request.SystemSegments) {
+      // A rough token estimate, and roughness is fine: it only decides whether a breakpoint is worth placing.
+      accumulated = accumulated + segment.Content.Length / 4;
+      var lastInTier = index == request.SystemSegments.Count - 1
+        || request.SystemSegments[index + 1].Stability != segment.Stability;
+      var cacheThis = lastInTier && segment.Stability != LlmCacheStability.TurnLevel && accumulated >= 1024;
+      if (cacheThis) {
+        blocks.Add(new { type = "text", text = segment.Content, cache_control = new { type = "ephemeral" } });
+      } else {
+        blocks.Add(new { type = "text", text = segment.Content });
+      }
+      index = index + 1;
+    }
+    return blocks;
+  }
+
+  LlmStopReason Stopped(string? reason) {
+    if (reason == "tool_use") { return LlmStopReason.ToolUse; }
+    if (reason == "max_tokens") { return LlmStopReason.MaxTokens; }
+    if (reason == "stop_sequence") { return LlmStopReason.StopSequence; }
+    return LlmStopReason.EndTurn;
+  }
+
+  /// Does this model still accept `temperature` / `top_p`?
+  ///
+  /// ⛔ AN ALLOWLIST OF MODELS THAT STILL DO, not a denylist of ones that don't, and the direction is the whole point.
+  /// The set that accepts sampling parameters is closed and shrinking — it is the older models — while new models keep
+  /// arriving without them. A denylist is therefore wrong the day a model ships, and wrong in the worst direction:
+  /// every call 400s. This list going stale means a legacy model quietly stops receiving a temperature it declared,
+  /// which is a degradation rather than an outage. Prefixes, so a dated snapshot matches without its own entry.
+  bool AcceptsSampling(string model) {
+    List<string> legacy = ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-opus-4-5", "claude-opus-4-1",
+                           "claude-opus-4-0", "claude-sonnet-4-0", "claude-3"];
+    foreach (var prefix in legacy) {
+      if (model.StartsWith(prefix)) { return true; }
+    }
+    return false;
+  }
+
+  string Failure(int status, string body) {
+    return "Anthropic answered " + Convert.ToString(status) + ": " + body;
+  }
+}

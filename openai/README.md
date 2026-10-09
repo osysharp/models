@@ -88,8 +88,8 @@ names a host, and a package granted nothing reaches nothing.
 
 - **Streaming with usage.** `stream_options.include_usage` is always set when streaming, because without it the token
   counts never arrive and the last event of the stream — the one the platform bills from — carries zeros.
-- **It always sends a `MessageComplete`**, even if the stream is cut short. The C# adapter this replaces sent it only
-  when a `finish_reason` arrived, so a dropped connection produced a call the platform could not meter.
+- **It always sends a `MessageComplete`**, even if the stream is cut short — not only when a `finish_reason` arrives —
+  so a dropped connection still produces a call the platform can meter.
 - **The cached prefix is not charged twice.** OpenAI counts cached tokens INSIDE `prompt_tokens`, so the kit reports
   `prompt_tokens − cached_tokens` as input and the cached count beside it. The two add up to what OpenAI billed.
 - **It does not choose a model.** `request.Model` arrives already decided by the app's `ILlmRouter`. A provider that

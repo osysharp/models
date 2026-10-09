@@ -8,7 +8,7 @@
 // setting on the registration, so the app names its own secret (`Client = new AnthropicClient { ApiKey = Secret.Mine }`)
 // and this package never learns which.
 package Osysharp.Models.Anthropic {
-  version     "0.1.0";
+  version "0.1.1";
   minPlatform "0.9.0";
   summary     "the Anthropic Messages API as an app.Models `Client` — complete and stream, with prompt caching.";
 

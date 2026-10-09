@@ -133,7 +133,7 @@ public class AnthropicClient : ILlmClient {
 
   /// ⭐ A TYPED BODY, and the ignore condition is why — `temperature`, `top_p` and `tools` must each be ABSENT rather
   /// than null when they do not apply, and they are independent axes. See the note at the top of `AnthropicWire.osy`:
-  /// this was four hand-written shapes until 2026-09-20, and the sampling one sent `"temperature": null`.
+  /// four hand-written shapes would be one per combination, and a sampling one would send `"temperature": null`.
   Json Body(LlmRequest request, bool streaming) {
     List<Json> messages = [];
     foreach (var m in request.Messages) { messages.Add(Message(m)); }

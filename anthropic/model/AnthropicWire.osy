@@ -9,11 +9,9 @@ namespace Osysharp.Models.Anthropic;
 // `JsonSerializer.Serialize(body, new JsonSerializerOptions { DefaultIgnoreCondition = WhenWritingNull })` says it
 // once, and it is what a C# author writes.
 //
-// ⚠ THIS KIT DID IT THE OTHER WAY UNTIL 2026-09-20, branching the whole body on `AcceptsSampling`, and the branch was
-// not merely verbose: the sampling arm wrote `"temperature": null` for every request that declared none, which is the
-// key-is-present case the allowlist exists to avoid. A `Json` MEMBER of a class could not be written at all back then
-// (it came out quoted), so the typed form was unavailable; that is fixed, and all three provider kits now share this
-// shape.
+// ⚠ Branching the whole body on `AcceptsSampling` instead would be more than verbose: a sampling arm writes
+// `"temperature": null` for every request that declares none, which is the key-is-present case the allowlist exists
+// to avoid. All three provider kits share this shape.
 //
 // The MESSAGES stay anonymous objects (`List<Json>` below), because they are heterogeneous rather than optional: a
 // text block, an image, a tool call and a tool result are four shapes sharing one position.

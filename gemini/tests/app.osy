@@ -6,5 +6,5 @@ app PlantNursery {
   tests "**/*.test.osy";
   use Osysharp.Http;
   use Osysharp.Llm@2;
-  use Osysharp.Models.Gemini@0 { egress "generativelanguage.googleapis.com"; }
+  use Osysharp.Models.Gemini@1 { egress "generativelanguage.googleapis.com"; }
 }

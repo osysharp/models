@@ -34,7 +34,7 @@ It has no user interface, so there is nothing to screenshot: it is where a model
 app Support {
   model "**/*.osy";
   use Osysharp.Llm@2;
-  use Osysharp.Models.Gemini@0 { egress "generativelanguage.googleapis.com"; }
+  use Osysharp.Models.Gemini@1 { egress "generativelanguage.googleapis.com"; }
 }
 ```
 

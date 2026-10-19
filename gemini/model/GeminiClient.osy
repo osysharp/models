@@ -3,19 +3,19 @@ namespace Osysharp.Models.Gemini;
 using Osysharp.Http;
 using Osysharp.Llm;
 
-/// The Google Gemini API as an `ILlmClient`. Register it on the model it serves:
+/// The Google Gemini API as an `ILlmClient`. Name it on the model it serves:
 ///
-///   app.Models = [
-///     new LlmConfig("Fast")   { Client = new GeminiClient { ApiKey = Secret.Gemini }, Model = "gemini-2.5-flash" },
-///     new LlmConfig("Strong") { Client = new GeminiClient { ApiKey = Secret.Gemini }, Model = "gemini-2.5-pro" },
-///   ];
+///   app.Llm = new LlmSetup { Models = [
+///     new LlmModel { Name = "Fast", Client = new GeminiClient { ApiKey = Secret.Gemini }, Model = "gemini-2.5-flash" },
+///     new LlmModel { Name = "Strong", Client = new GeminiClient { ApiKey = Secret.Gemini }, Model = "gemini-2.5-pro" },
+///   ] };
 ///
-/// ⚑ GEMINI'S SHAPE DIVERGES MORE THAN THE OTHER TWO, and all of it is handled here rather than leaking into the seam:
+/// ⚑ GEMINI'S SHAPE DIVERGES MORE THAN THE OTHER TWO, and all of it is handled here rather than leaking into the contract:
 /// roles are `user`/`model` (never `assistant`), the system prompt is a separate `system_instruction` rather than a
 /// message, the model id travels in the URL PATH rather than the body, and a tool result is matched back to its call by
 /// the function's NAME because Gemini has no tool-call id at all.
 ///
-/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's `ILlmRouter`; this serves what
+/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's router; this serves what
 /// it is given. A provider that second-guessed the decision would make every routing policy advisory.
 ///
 /// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
@@ -32,7 +32,7 @@ public class GeminiClient : ILlmClient {
   /// unbounded answer is an unbounded bill.
   public int MaxTokens = 4096;
 
-  public LlmResponse Complete(LlmRequest request) {
+  internal LlmResponse Complete(LlmRequest request) {
     var r = Http.Post(Endpoint(request.Model, "generateContent"), Body(request), "application/json", Headers(false));
     if (!r.IsSuccess) { throw new ExternalServiceException(Failure(r.StatusCode, r.Body)); }
 
@@ -73,7 +73,7 @@ public class GeminiClient : ILlmClient {
   }
 
   /// The answer as it is written. `alt=sse` turns Gemini's streaming call into server-sent events, one JSON chunk each.
-  public stream<LlmStreamEvent> Stream(LlmRequest request) {
+  internal stream<LlmStreamEvent> Stream(LlmRequest request) {
     var inputTokens = 0;
     var outputTokens = 0;
     var cached = 0;
@@ -118,7 +118,7 @@ public class GeminiClient : ILlmClient {
       }
     }
 
-    // ⛔ THE LAST EVENT OF EVERY STREAM, whatever the stream did — it is what the platform meters from.
+    // ⛔ THE LAST EVENT OF EVERY STREAM, whatever the stream did — it is what the call is priced from.
     yield return new LlmStreamEvent {
       Kind = LlmStreamEventKind.MessageComplete,
       StopReason = wantsTools ? LlmStopReason.ToolUse : stopReason,
@@ -182,6 +182,24 @@ public class GeminiClient : ILlmClient {
       List<Json> tools = [];
       tools.Add(new { functionDeclarations = declared });
       body.Tools = tools;
+
+      // Whether the model may, must or may not call a tool: Gemini's `ANY` and `NONE` modes, with the one function
+      // allowed when a tool is named.
+      if (request.ToolChoice == LlmToolChoice.Any) {
+        body.ToolConfig = new { functionCallingConfig = new { mode = "ANY" } };
+      } else if (request.ToolChoice == LlmToolChoice.None) {
+        body.ToolConfig = new { functionCallingConfig = new { mode = "NONE" } };
+      } else if (request.ToolChoice == LlmToolChoice.Named) {
+        List<string> only = [request.ToolChoiceName ?? ""];
+        body.ToolConfig = new { functionCallingConfig = new { mode = "ANY", allowedFunctionNames = only } };
+      }
+    }
+
+    // A document of a schema: the answer arrives as the candidate's text, which is the JSON.
+    if (request.OutputSchemaJson != null) {
+      Json schema = request.OutputSchemaJson!;
+      body.GenerationConfig!.ResponseMimeType = "application/json";
+      body.GenerationConfig!.ResponseJsonSchema = schema;
     }
 
     return JsonSerializer.Serialize(body,
@@ -196,7 +214,8 @@ public class GeminiClient : ILlmClient {
       foreach (var b in m.Content) {
         if (b.Kind == LlmBlockKind.Text) {
           parts.Add(new { text = b.Text ?? "" });
-        } else if (b.Kind == LlmBlockKind.Image) {
+        } else if (b.Kind == LlmBlockKind.Image || b.Kind == LlmBlockKind.Document) {
+          // A picture and a PDF are both inline data to Gemini, told apart by their media type.
           parts.Add(new { inlineData = new { mimeType = b.MediaType ?? "", data = b.DataBase64 ?? "" } });
         } else if (b.Kind == LlmBlockKind.ToolUse) {
           Json arguments = b.InputJson == null || b.InputJson == "" ? "{}" : b.InputJson;
@@ -267,7 +286,7 @@ public class GeminiClient : ILlmClient {
   }
 
   /// ⚠ A FUNCTION CALL WINS OVER THE FINISH REASON. Gemini answers `STOP` on a turn that asked for a tool, so reading
-  /// the reason alone would tell the platform the model was finished while its answer is a tool call waiting to be run.
+  /// the reason alone would tell the caller the model was finished while its answer is a tool call waiting to be run.
   LlmStopReason Stopped(string? reason, bool wantsTools) {
     if (wantsTools) { return LlmStopReason.ToolUse; }
     if (reason == "MAX_TOKENS") { return LlmStopReason.MaxTokens; }

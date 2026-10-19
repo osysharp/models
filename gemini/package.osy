@@ -8,13 +8,14 @@
 // setting on the registration, so the app names its own secret (`Client = new GeminiClient { ApiKey = Secret.Mine }`)
 // and this package never learns which.
 package Osysharp.Models.Gemini {
-  version     "0.1.0";
-  minPlatform "0.9.0";
-  summary     "the Google Gemini API as an app.Models `Client` — complete and stream, tools included.";
+  version     "0.4.0";
+  minPlatform "0.14.0";
+  summary     "the Google Gemini API as a model provider for Osysharp.Llm — complete and stream, tools included.";
 
   model "model/*.osy";
+  tests "tests";
   use Osysharp.Http;
-  use Osysharp.Llm;
+  use Osysharp.Llm@2;
 
   egress "generativelanguage.googleapis.com";
 }

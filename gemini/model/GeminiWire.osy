@@ -17,6 +17,8 @@ public class GeminiRequest {
   /// Absent when the app declared no tools — and ONE object holding every declaration when it did.
   [ExternalName("tools")] public List<Json>? Tools;
   [ExternalName("generationConfig")] public GeminiGenerationConfig? GenerationConfig;
+  /// Absent when the model decides for itself, which is Gemini's default.
+  [ExternalName("toolConfig")] public Json? ToolConfig;
 }
 
 /// The sampling settings. Each is left out when the request did not ask for it.
@@ -24,6 +26,9 @@ public class GeminiGenerationConfig {
   [ExternalName("temperature")] public decimal? Temperature;
   [ExternalName("topP")] public decimal? TopP;
   [ExternalName("maxOutputTokens")] public int? MaxOutputTokens;
+  /// Both set, or neither: a request for a document of a schema.
+  [ExternalName("responseMimeType")] public string? ResponseMimeType;
+  [ExternalName("responseJsonSchema")] public Json? ResponseJsonSchema;
 }
 
 /// What comes back — from a whole call and from one streamed chunk alike, which is Gemini's own shape: a chunk is a
@@ -56,7 +61,7 @@ public class GeminiFunctionCall {
   [ExternalName("args")] public Json? Args;
 }
 
-/// The token counts. ⚠ The platform meters from these, and `promptTokenCount` INCLUDES the cached prefix — see
+/// The token counts. ⚠ The meter prices from these, and `promptTokenCount` INCLUDES the cached prefix — see
 /// `GeminiClient.Cached`, which is why the client subtracts it rather than reporting both.
 public class GeminiUsage {
   [ExternalName("promptTokenCount")] public int PromptTokenCount;

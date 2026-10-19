@@ -1,0 +1,13 @@
+// The nursery's one model, and its key. In a file of its own with no `namespace`, because an `app.X = …` statement's
+// value is resolved outside the file's namespace.
+using Osysharp.Llm;
+using Osysharp.Models.Gemini;
+
+app.Secrets = [ new Secret("Gemini") ];
+
+app.Llm = new LlmSetup {
+  Models = [
+    new LlmModel { Name = "Gardener", Client = new GeminiClient { ApiKey = Secret.Gemini }, Model = "gemini-2.5-flash",
+                   Price = new LlmPrice { Input = 0.3m, Output = 2.5m, CacheRead = 0.03m } },
+  ],
+};

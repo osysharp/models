@@ -1,0 +1,44 @@
+// A plant nursery: growers ask about plants, and the nursery reads what a plant needs out of its label.
+namespace PlantNursery;
+
+using Osysharp.Llm;
+
+/// Everybody at the nursery reads what the model cost.
+policy ReadsModelUsage => true;
+
+/// What a plant's label says it needs.
+public class Care {
+  /// The plant's name.
+  public string Plant = "";
+  /// Days between waterings.
+  public int WaterEveryDays;
+  public bool FullSun;
+}
+
+/// Something the stand-in for Google was sent.
+entity Sent {
+  [MaxLength(400)] string Url = "";
+  string Body = "";
+  [MaxLength(400)] string Key = "";
+  /// The order it was sent in.
+  int Seq = 0;
+  security { allow read, create when IsAuthenticated || IsAnonymous; }
+}
+
+string Answer(string question) { return (await Llm.Complete(RequestOf(question, "You advise growers."), new LlmCall())).Text(); }
+
+Care ReadLabel(string label) { return await Llm.Extract<Care>(label); }
+/// A care label read off a photo or a PDF.
+Care ReadLabelFile(string mediaType, byte[] bytes) { return await Llm.Extract<Care>(Llm.FileBlock(mediaType, bytes)); }
+
+/// One turn with a tool the model may — or must — call.
+LlmResult AskWithStock(string question, LlmToolChoice choice) {
+  var request = RequestOf(question, "You advise growers.");
+  request.Tools.Add(new LlmToolDefinition {
+    Name = "in_stock", Description = "How many of a plant the nursery has.",
+    InputSchemaJson = "{\"type\":\"object\",\"properties\":{\"plant\":{\"type\":\"string\"}},\"required\":[\"plant\"]}",
+  });
+  request.ToolChoice = choice;
+  if (choice == LlmToolChoice.Named) { request.ToolChoiceName = "in_stock"; }
+  return await Llm.Complete(request, new LlmCall());
+}

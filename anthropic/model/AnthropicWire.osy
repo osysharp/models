@@ -30,6 +30,10 @@ public class AnthropicMessageRequest {
   /// Set only for a model that still accepts sampling parameters — see `AnthropicClient.AcceptsSampling`.
   [ExternalName("temperature")] public decimal? Temperature;
   [ExternalName("top_p")] public decimal? TopP;
+  /// Absent when the model decides for itself, which is Anthropic's default.
+  [ExternalName("tool_choice")] public Json? ToolChoice;
+  /// The answer's shape, when the request asks for a document of a schema. Absent for free text.
+  [ExternalName("output_config")] public Json? OutputConfig;
 }
 
 /// What comes back from a non-streaming call.
@@ -48,7 +52,7 @@ public class AnthropicBlock {
   [ExternalName("input")] public Json? Input;
 }
 
-/// The token counts. ⚠ The platform meters from these — report what Anthropic reported.
+/// The token counts. ⚠ The meter prices from these — report what Anthropic reported.
 public class AnthropicUsage {
   [ExternalName("input_tokens")] public int InputTokens;
   [ExternalName("output_tokens")] public int OutputTokens;

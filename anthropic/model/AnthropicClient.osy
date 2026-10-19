@@ -3,14 +3,14 @@ namespace Osysharp.Models.Anthropic;
 using Osysharp.Http;
 using Osysharp.Llm;
 
-/// The Anthropic Messages API as an `ILlmClient`. Register it on the model it serves:
+/// The Anthropic Messages API as an `ILlmClient`. Name it on the model it serves:
 ///
-///   app.Models = [
-///     new LlmConfig("Fast")   { Client = new AnthropicClient { ApiKey = Secret.Anthropic }, Model = "claude-haiku-4-5" },
-///     new LlmConfig("Strong") { Client = new AnthropicClient { ApiKey = Secret.Anthropic }, Model = "claude-sonnet-5" },
-///   ];
+///   app.Llm = new LlmSetup { Models = [
+///     new LlmModel { Name = "Fast", Client = new AnthropicClient { ApiKey = Secret.Anthropic }, Model = "claude-haiku-5-5" },
+///     new LlmModel { Name = "Strong", Client = new AnthropicClient { ApiKey = Secret.Anthropic }, Model = "claude-opus-5-5" },
+///   ] };
 ///
-/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's `ILlmRouter`; this serves what
+/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's router; this serves what
 /// it is given. A provider that second-guessed the decision would make every routing policy advisory.
 ///
 /// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
@@ -23,8 +23,13 @@ public class AnthropicClient : ILlmClient {
   public string BaseUrl = "https://api.anthropic.com";
   /// What to ask for when the request does not say. Anthropic REQUIRES `max_tokens`, so there is always a number.
   public int MaxTokens = 4096;
+  /// How a request for a document of a schema (`LlmRequest.OutputSchemaJson`) is made. True: Anthropic holds the model
+  /// to the schema itself (`output_config.format`). False: the schema goes into the system prompt and the model is
+  /// asked to follow it — for a schema using something Anthropic's own check refuses (a `maxLength`, a `minimum`, a
+  /// class that contains itself).
+  public bool NativeStructuredOutput = true;
 
-  public LlmResponse Complete(LlmRequest request) {
+  internal LlmResponse Complete(LlmRequest request) {
     var r = Http.Post(BaseUrl + "/v1/messages", Body(request, false), "application/json", Headers(false));
     if (!r.IsSuccess) { throw new ExternalServiceException(Failure(r.StatusCode, r.Body)); }
 
@@ -58,8 +63,8 @@ public class AnthropicClient : ILlmClient {
 
   /// The answer as it is written. Anthropic reports the INPUT counts on `message_start` and the OUTPUT count on
   /// `message_delta`, so both are carried across the loop and sent together in the one `MessageComplete` the
-  /// platform meters from.
-  public stream<LlmStreamEvent> Stream(LlmRequest request) {
+  /// meter prices from.
+  internal stream<LlmStreamEvent> Stream(LlmRequest request) {
     var inputTokens = 0;
     var outputTokens = 0;
     var cacheCreation = 0;
@@ -173,6 +178,20 @@ public class AnthropicClient : ILlmClient {
       body.TopP = request.TopP;
     }
 
+    // Whether the model may, must or may not call a tool. ⚠ The newest models refuse a forced call (`Any`, `Named`)
+    // with a 400, which reaches the caller as this provider's failure — ask with `Auto` and say so in the prompt there.
+    if (request.Tools.Count > 0) {
+      if (request.ToolChoice == LlmToolChoice.Any) { body.ToolChoice = new { type = "any" }; }
+      else if (request.ToolChoice == LlmToolChoice.None) { body.ToolChoice = new { type = "none" }; }
+      else if (request.ToolChoice == LlmToolChoice.Named) { body.ToolChoice = new { type = "tool", name = request.ToolChoiceName ?? "" }; }
+    }
+
+    // A document of a schema: the answer still arrives as one text block, whose text is the JSON.
+    if (request.OutputSchemaJson != null && NativeStructuredOutput) {
+      Json schema = request.OutputSchemaJson!;
+      body.OutputConfig = new { format = new { type = "json_schema", schema = schema } };
+    }
+
     return JsonSerializer.Serialize(body,
       new JsonSerializerOptions { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull });
   }
@@ -190,6 +209,9 @@ public class AnthropicClient : ILlmClient {
         }
       } else if (b.Kind == LlmBlockKind.Image) {
         content.Add(new { type = "image",
+                          source = new { type = "base64", media_type = b.MediaType ?? "", data = b.DataBase64 ?? "" } });
+      } else if (b.Kind == LlmBlockKind.Document) {
+        content.Add(new { type = "document",
                           source = new { type = "base64", media_type = b.MediaType ?? "", data = b.DataBase64 ?? "" } });
       } else if (b.Kind == LlmBlockKind.ToolUse) {
         Json arguments = b.InputJson ?? "{}";
@@ -216,6 +238,15 @@ public class AnthropicClient : ILlmClient {
   /// array of text blocks, and using one shape for both means the key has ONE type — where two would need the request
   /// body branched again, on an axis that changes nothing about the call.
   List<Json> SystemContent(LlmRequest request) {
+    List<Json> blocks = SystemBlocks(request);
+    if (request.OutputSchemaJson != null && !NativeStructuredOutput) {
+      blocks.Add(new { type = "text", text = "Answer with one JSON document of this schema, and nothing else — no words "
+        + "before or after it, no code fence:\n" + request.OutputSchemaJson! });
+    }
+    return blocks;
+  }
+
+  List<Json> SystemBlocks(LlmRequest request) {
     List<Json> blocks = [];
     if (request.SystemSegments.Count == 0) {
       if (request.SystemPrompt != null) { blocks.Add(new { type = "text", text = request.SystemPrompt }); }

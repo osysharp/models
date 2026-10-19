@@ -1,0 +1,16 @@
+// The desk's one model, and its key. In a file of its own with no `namespace`, because an `app.X = …` statement's
+// value is resolved outside the file's namespace.
+using Osysharp.Llm;
+using Osysharp.Models.Anthropic;
+
+app.Secrets = [ new Secret("Anthropic") ];
+
+app.Llm = new LlmSetup {
+  Models = [
+    new LlmModel { Name = "Desk", Client = new AnthropicClient { ApiKey = Secret.Anthropic }, Model = "claude-haiku-5-5",
+                   Price = new LlmPrice { Input = 0.1m, Output = 0.5m } },
+    // The same provider told to put a schema in the prompt rather than have Anthropic check it.
+    new LlmModel { Name = "Prompted", Client = new AnthropicClient { ApiKey = Secret.Anthropic, NativeStructuredOutput = false },
+                   Model = "claude-haiku-5-5" },
+  ],
+};

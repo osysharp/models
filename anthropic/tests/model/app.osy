@@ -1,0 +1,59 @@
+// A ferry line's desk: travellers ask about sailings, and the desk reads what they want out of what they wrote.
+namespace FerryDesk;
+
+using Osysharp.Llm;
+
+/// Everybody at the desk reads what the model cost.
+policy ReadsModelUsage => true;
+
+/// What a traveller is asking for.
+public class Crossing {
+  /// The harbour they leave from.
+  public string From = "";
+  /// The harbour they are going to.
+  public string To = "";
+  public int Passengers;
+  /// Whether they bring a car.
+  public bool WithCar;
+}
+
+/// Something the stand-in for Anthropic was sent.
+entity Sent {
+  [MaxLength(400)] string Url = "";
+  string Body = "";
+  [MaxLength(400)] string Key = "";
+  /// The order it was sent in.
+  int Seq = 0;
+  security { allow read, create when IsAuthenticated || IsAnonymous; }
+}
+
+string Answer(string question) { return await Llm.Complete(question); }
+
+/// A crossing read out of a booking confirmation the traveller sent as a PDF or a photo.
+Crossing ReadCrossingFromFile(string mediaType, byte[] bytes) {
+  return await Llm.Extract<Crossing>(Llm.FileBlock(mediaType, bytes), "The traveller's own booking.");
+}
+
+Crossing ReadCrossing(string message, string model) {
+  return await Llm.Extract<Crossing>(message, "", new LlmCall { Model = model });
+}
+
+/// One turn with a tool the model may — or must — call.
+LlmResult AskWithTimetable(string question, LlmToolChoice choice) {
+  var request = RequestOf(question, "You answer travellers of a ferry line.");
+  request.Tools.Add(new LlmToolDefinition {
+    Name = "next_sailing", Description = "The next sailing between two harbours.",
+    InputSchemaJson = "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\"},\"to\":{\"type\":\"string\"}},\"required\":[\"from\",\"to\"]}",
+  });
+  request.ToolChoice = choice;
+  if (choice == LlmToolChoice.Named) { request.ToolChoiceName = "next_sailing"; }
+  return await Llm.Complete(request, new LlmCall());
+}
+
+string Recite(string question) {
+  var words = "";
+  await foreach (var e in Llm.Stream(question)) {
+    if (e.Kind == LlmStreamEventKind.TextDelta) { words = words + (e.Delta ?? ""); }
+  }
+  return words;
+}

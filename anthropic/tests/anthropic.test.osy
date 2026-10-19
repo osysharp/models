@@ -1,0 +1,149 @@
+// Osysharp.Models.Anthropic — what goes out to Anthropic, and how what comes back is read. `Http.Post.Stub` stands in
+// for the API: it keeps each request it was sent, and answers as Anthropic does.
+using Osysharp.Llm;
+using Osysharp.Http;
+using FerryDesk;
+
+[TestFixture]
+void Desk() {
+  Secret.Anthropic.Stub("sk-ant-test");
+}
+
+/// Anthropic's answer to a plain question.
+HttpResponse Says(string text, int inputTokens, int outputTokens) {
+  return new HttpResponse { StatusCode = 200, Body =
+    "{\"content\":[{\"type\":\"text\",\"text\":" + JsonSerializer.Serialize(text) + "}],\"stop_reason\":\"end_turn\","
+    + "\"usage\":{\"input_tokens\":" + inputTokens + ",\"output_tokens\":" + outputTokens + ",\"cache_read_input_tokens\":0}}" };
+}
+
+[Test(Desk)]
+void a_question_goes_out_in_anthropics_shape_and_its_answer_and_usage_come_back() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Url = url, Body = body, Key = headers["x-api-key"] };
+    return Says("The 14:10 from Visby.", 2000, 400);
+  });
+  Assert.Equal("The 14:10 from Visby.", Answer("When is the next ferry from Visby?"));
+
+  var sent = Sent.Single();
+  Assert.Equal("https://api.anthropic.com/v1/messages", sent.Url);
+  Assert.Equal("sk-ant-test", sent.Key);
+  // The provider's own id for the model, the question as a user turn, and a max_tokens — which Anthropic requires.
+  Assert.Contains("\"model\":\"claude-haiku-5-5\"", sent.Body);
+  Assert.Contains("\"role\":\"user\"", sent.Body);
+  Assert.Contains("When is the next ferry from Visby?", sent.Body);
+  Assert.Contains("\"max_tokens\":", sent.Body);
+  // Nothing that was not asked for: no tool choice, no output format, no sampling on a model that removed it.
+  Assert.DoesNotContain("tool_choice", sent.Body);
+  Assert.DoesNotContain("output_config", sent.Body);
+  Assert.DoesNotContain("temperature", sent.Body);
+
+  // Anthropic's own counts are what the meter prices: 2000 at $0.10 a million and 400 at $0.50.
+  var row = ModelCall.Single();
+  Assert.Equal(2000, row.InputTokens);
+  Assert.Equal(400, row.OutputTokens);
+  Assert.Equal(400, row.CostMicros);
+}
+
+[Test(Desk)]
+void a_typed_value_is_asked_for_as_anthropics_own_output_format_and_read_from_the_text_block() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body, Seq = Sent.Count() };
+    return Says("{\"From\":\"Visby\",\"To\":\"Nynäshamn\",\"Passengers\":2,\"WithCar\":true}", 900, 60);
+  });
+  var crossing = ReadCrossing("Two of us and the car, Visby to Nynäshamn on Friday.", "Desk");
+  Assert.Equal("Visby", crossing.From);
+  Assert.Equal("Nynäshamn", crossing.To);
+  Assert.Equal(2, crossing.Passengers);
+  Assert.True(crossing.WithCar);
+
+  var body = Sent.Single().Body;
+  Assert.Contains("\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{", body);
+  Assert.Contains("\"Passengers\"", body);
+  Assert.Contains("Whether they bring a car.", body);
+}
+
+[Test(Desk)]
+void told_to_the_schema_goes_into_the_prompt_instead() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body, Seq = Sent.Count() };
+    return Says("{\"From\":\"Visby\",\"To\":\"Oskarshamn\",\"Passengers\":1,\"WithCar\":false}", 900, 60);
+  });
+  Assert.Equal("Oskarshamn", ReadCrossing("Just me, Visby to Oskarshamn.", "Prompted").To);
+  var body = Sent.Single().Body;
+  Assert.DoesNotContain("output_config", body);
+  Assert.Contains("Answer with one JSON document of this schema", body);
+  Assert.Contains("Passengers", body);
+}
+
+[Test(Desk)]
+void a_tool_call_comes_back_as_one_and_a_forced_choice_is_sent_as_asked() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body, Seq = Sent.Count() };
+    return new HttpResponse { StatusCode = 200, Body =
+      "{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"next_sailing\",\"input\":{\"from\":\"Visby\",\"to\":\"Nynäshamn\"}}],"
+      + "\"stop_reason\":\"tool_use\",\"usage\":{\"input_tokens\":300,\"output_tokens\":40}}" };
+  });
+
+  var auto = AskWithTimetable("Next ferry Visby to Nynäshamn?", LlmToolChoice.Auto);
+  Assert.Equal(LlmStopReason.ToolUse, auto.Response.StopReason);
+  var call = auto.Response.Content.Single();
+  Assert.Equal(LlmBlockKind.ToolUse, call.Kind);
+  Assert.Equal("toolu_1", call.ToolUseId);
+  Assert.Equal("next_sailing", call.ToolName);
+  Assert.Contains("\"from\":\"Visby\"", call.InputJson!);
+
+  AskWithTimetable("Next ferry?", LlmToolChoice.Any);
+  AskWithTimetable("Next ferry?", LlmToolChoice.None);
+  AskWithTimetable("Next ferry?", LlmToolChoice.Named);
+  var bodies = Sent.OrderBy(s => s.Seq).ToList().Select(s => s.Body).ToList();
+  Assert.DoesNotContain("tool_choice", bodies[0]);
+  Assert.Contains("\"tool_choice\":{\"type\":\"any\"}", bodies[1]);
+  Assert.Contains("\"tool_choice\":{\"type\":\"none\"}", bodies[2]);
+  Assert.Contains("\"tool_choice\":{\"type\":\"tool\",\"name\":\"next_sailing\"}", bodies[3]);
+}
+
+[Test(Desk)]
+void anthropics_refusal_is_the_providers_failure_and_is_on_the_meter() {
+  Http.Post.Stub((url, body, headers) => new HttpResponse { StatusCode = 529, Body = "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}" });
+  var fault = Assert.Throws<ExternalServiceException>(() => Answer("When is the next ferry?"));
+  Assert.Contains("Anthropic answered 529", fault.Message);
+  var row = ModelCall.Single();
+  Assert.Equal(ModelCallOutcome.Failed, row.Outcome);
+  Assert.Contains("529", row.Problem!);
+}
+
+[Test(Desk)]
+void a_pdf_goes_out_as_a_document_block_and_a_photo_as_an_image() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body, Seq = Sent.Count() };
+    return Says("{\"From\":\"Visby\",\"To\":\"Oskarshamn\",\"Passengers\":1,\"WithCar\":false}", 1500, 50);
+  });
+  Assert.Equal("Oskarshamn", ReadCrossingFromFile("application/pdf", Text.ToBytes("%PDF-1.7 booking")).To);
+  Assert.Equal("Oskarshamn", ReadCrossingFromFile("image/jpeg", Text.ToBytes("jpeg bytes")).To);
+
+  var bodies = Sent.OrderBy(s => s.Seq).ToList().Select(s => s.Body).ToList();
+  Assert.Contains("\"type\":\"document\",\"source\":{\"type\":\"base64\",\"media_type\":\"application/pdf\",\"data\":\""
+    + Convert.ToBase64String(Text.ToBytes("%PDF-1.7 booking")) + "\"}", bodies[0]);
+  Assert.Contains("\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/jpeg\"", bodies[1]);
+}
+
+[Test(Desk)]
+void a_file_no_model_reads_is_refused_before_anything_is_sent() {
+  Assert.Throws<ArgumentException>(() => ReadCrossingFromFile("application/zip", Text.ToBytes("PK")));
+  Assert.Equal(0, ModelCall.Count());
+}
+
+[Test(Desk)]
+void an_app_that_names_anthropic_tests_its_calls_with_the_script_and_nothing_goes_out() {
+  // The app's model is Anthropic's; the test scripts every model, so the script answers under the model's own name
+  // and the network is never asked — `Http.Post` is not stubbed, and a call to it would fail the test.
+  EveryModelIsScripted.Stub(() => true);
+  ScriptedAnswer.Stub((model, request) => Scripted.Text("Scripted for " + model + ".", 1000, 200));
+  Assert.Equal("Scripted for Desk.", Answer("When is the next ferry?"));
+
+  // Everything around the provider is real: the meter prices the script's counts at the app's own prices.
+  var row = ModelCall.Single();
+  Assert.Equal("Desk", row.Model);
+  Assert.Equal(ModelCallOutcome.Served, row.Outcome);
+  Assert.Equal(200, row.CostMicros);   // 1000 at $0.10 a million and 200 at $0.50
+}

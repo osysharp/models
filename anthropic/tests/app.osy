@@ -6,5 +6,5 @@ app FerryDesk {
   tests "**/*.test.osy";
   use Osysharp.Http;
   use Osysharp.Llm@2;
-  use Osysharp.Models.Anthropic@0 { egress "api.anthropic.com"; }
+  use Osysharp.Models.Anthropic@1 { egress "api.anthropic.com"; }
 }

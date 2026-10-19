@@ -23,7 +23,7 @@ It has no user interface, so there is nothing to screenshot: it is where a model
 app Support {
   model "**/*.osy";
   use Osysharp.Llm@2;
-  use Osysharp.Models.Anthropic@0 { egress "api.anthropic.com"; }
+  use Osysharp.Models.Anthropic@1 { egress "api.anthropic.com"; }
 }
 ```
 

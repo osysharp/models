@@ -3,19 +3,19 @@ namespace Osysharp.Models.OpenAi;
 using Osysharp.Http;
 using Osysharp.Llm;
 
-/// The OpenAI Chat Completions API as an `ILlmClient`. Register it on the model it serves:
+/// The OpenAI Chat Completions API as an `ILlmClient`. Name it on the model it serves:
 ///
-///   app.Models = [
-///     new LlmConfig("Fast")   { Client = new OpenAiClient { ApiKey = Secret.OpenAi }, Model = "gpt-4o-mini" },
-///     new LlmConfig("Strong") { Client = new OpenAiClient { ApiKey = Secret.OpenAi }, Model = "gpt-4o" },
-///   ];
+///   app.Llm = new LlmSetup { Models = [
+///     new LlmModel { Name = "Fast", Client = new OpenAiClient { ApiKey = Secret.OpenAi }, Model = "gpt-4o-mini" },
+///     new LlmModel { Name = "Strong", Client = new OpenAiClient { ApiKey = Secret.OpenAi }, Model = "gpt-4o" },
+///   ] };
 ///
 /// ⭐ AND IT SERVES ANY ENDPOINT THAT SPEAKS THE SAME WIRE — vLLM, llama.cpp, OpenRouter, your own gateway:
 ///
-///   new LlmConfig("Local") { Client = new OpenAiClient { ApiKey = Secret.Local, BaseUrl = "http://vllm.internal:8000",
+///   new LlmModel { Name = "Local", Client = new OpenAiClient { ApiKey = Secret.Local, BaseUrl = "http://vllm.internal:8000",
 ///                                                        LegacyMaxTokens = true }, Model = "llama-3.3-70b" }
 ///
-/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's `ILlmRouter`; this serves what
+/// ⛔ IT DOES NOT CHOOSE A MODEL. `request.Model` arrives already decided by the app's router; this serves what
 /// it is given. A provider that second-guessed the decision would make every routing policy advisory.
 ///
 /// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
@@ -36,7 +36,7 @@ public class OpenAiClient : ILlmClient {
   /// server that rejects unknown fields fails the whole call on the other one.
   public bool LegacyMaxTokens = false;
 
-  public LlmResponse Complete(LlmRequest request) {
+  internal LlmResponse Complete(LlmRequest request) {
     var r = Http.Post(BaseUrl + "/v1/chat/completions", Body(request, false), "application/json", Headers(false));
     if (!r.IsSuccess) { throw new ExternalServiceException(Failure(r.StatusCode, r.Body)); }
 
@@ -77,7 +77,7 @@ public class OpenAiClient : ILlmClient {
   /// The answer as it is written. OpenAI streams tool calls as INDEXED deltas — the first delta for an index carries
   /// the id and the function name, later ones append `arguments` — so the ids are remembered per index and one
   /// `ToolUseStart` is emitted per call, with its arguments after it.
-  public stream<LlmStreamEvent> Stream(LlmRequest request) {
+  internal stream<LlmStreamEvent> Stream(LlmRequest request) {
     var announced = new Dictionary<int, string>();
     var inputTokens = 0;
     var outputTokens = 0;
@@ -137,7 +137,7 @@ public class OpenAiClient : ILlmClient {
 
     // ⛔ ALWAYS, AND THE C# ADAPTER THIS REPLACES DID NOT. It emitted the final event only `if (sawFinish)`, so a
     //    stream cut short — the connection dropped, the server stopped mid-answer — produced no `MessageComplete` at
-    //    all, and the seam says that is a call the platform cannot meter. Whatever counts are in hand is the answer.
+    //    all, and the contract says that is a call that cannot be metered. Whatever counts are in hand is the answer.
     yield return new LlmStreamEvent {
       Kind = LlmStreamEventKind.MessageComplete,
       StopReason = stopReason,
@@ -178,7 +178,25 @@ public class OpenAiClient : ILlmClient {
     var max = request.MaxTokens ?? MaxTokens;
     if (LegacyMaxTokens) { body.MaxTokens = max; } else { body.MaxCompletionTokens = max; }
 
-    if (request.Tools.Count > 0) { body.Tools = Tools(request); }
+    if (request.Tools.Count > 0) {
+      body.Tools = Tools(request);
+      // Whether the model may, must or may not call a tool. `required` is OpenAI's word for "any of them".
+      if (request.ToolChoice == LlmToolChoice.Any) { Json any = "\"required\""; body.ToolChoice = any; }
+      else if (request.ToolChoice == LlmToolChoice.None) { Json none = "\"none\""; body.ToolChoice = none; }
+      else if (request.ToolChoice == LlmToolChoice.Named) {
+        body.ToolChoice = new { type = "function", function = new { name = request.ToolChoiceName ?? "" } };
+      }
+    }
+
+    // A document of a schema: the answer arrives as the message's content, whose text is the JSON.
+    // ⚠ `strict: false`, deliberately. OpenAI's strict mode demands every property be `required`, and a schema written
+    //   from a type leaves a nullable member out of `required` — which strict mode refuses outright. Unstrict, the
+    //   model is still given the schema and follows it; the caller reads the answer as the type either way.
+    if (request.OutputSchemaJson != null) {
+      Json schema = request.OutputSchemaJson!;
+      body.ResponseFormat = new { type = "json_schema",
+                                  json_schema = new { name = request.OutputName, schema = schema, strict = false } };
+    }
     if (streaming) {
       body.Stream = true;
       body.StreamOptions = new OpenAiStreamOptions { IncludeUsage = true };
@@ -209,6 +227,10 @@ public class OpenAiClient : ILlmClient {
           // OpenAI takes the bytes as a data: URL rather than a media type beside them.
           images.Add(new { type = "image_url",
                            image_url = new { url = "data:" + (b.MediaType ?? "") + ";base64," + (b.DataBase64 ?? "") } });
+        } else if (b.Kind == LlmBlockKind.Document) {
+          // A PDF goes as a `file` part, its bytes a data: URL the same way.
+          images.Add(new { type = "file",
+                           file = new { filename = "document.pdf", file_data = "data:" + (b.MediaType ?? "") + ";base64," + (b.DataBase64 ?? "") } });
         } else if (b.Kind == LlmBlockKind.ToolUse) {
           toolCalls.Add(new { id = b.ToolUseId ?? "", type = "function",
                               function = new { name = b.ToolName ?? "", arguments = b.InputJson ?? "{}" } });

@@ -1,0 +1,13 @@
+// The producer's test project for Osysharp.Models.OpenAi — a recipe box that reads recipes people paste in. Nothing is
+// sent to OpenAI: `Http.Post.Stub` stands in for it, so a test reads exactly what would have gone out and decides what
+// comes back.
+app RecipeBox {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Http;
+  use Osysharp.Llm@2;
+  use Osysharp.Models.OpenAi@1 {
+    egress "api.openai.com";
+    egress "models.annex.example";     // the box's own endpoint, which speaks the same wire
+  }
+}

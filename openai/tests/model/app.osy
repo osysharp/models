@@ -1,0 +1,47 @@
+// A recipe box: people paste a recipe in, and the box reads what it needs out of it.
+namespace RecipeBox;
+
+using Osysharp.Llm;
+
+/// Everybody who cooks reads what the model cost.
+policy ReadsModelUsage => true;
+
+/// What a pasted recipe says.
+public class Recipe {
+  /// What the dish is called.
+  public string Title = "";
+  public int Serves;
+  /// Minutes from start to table.
+  public int Minutes;
+  public bool Vegetarian;
+}
+
+/// Something the stand-in for OpenAI was sent.
+entity Sent {
+  [MaxLength(400)] string Url = "";
+  string Body = "";
+  [MaxLength(400)] string Authorization = "";
+  /// The order it was sent in.
+  int Seq = 0;
+  security { allow read, create when IsAuthenticated || IsAnonymous; }
+}
+
+string Answer(string question) { return await Llm.Complete(question); }
+
+string AnswerLocally(string question) { return await Llm.Complete(question, "Local"); }
+
+Recipe ReadRecipe(string pasted) { return await Llm.Extract<Recipe>(pasted); }
+/// A recipe read off a PDF or a photographed card.
+Recipe ReadRecipeFile(string mediaType, byte[] bytes) { return await Llm.Extract<Recipe>(Llm.FileBlock(mediaType, bytes)); }
+
+/// One turn with a tool the model may — or must — call.
+LlmResult AskWithPantry(string question, LlmToolChoice choice) {
+  var request = RequestOf(question, "You help somebody cook from what they have.");
+  request.Tools.Add(new LlmToolDefinition {
+    Name = "in_pantry", Description = "Whether an ingredient is in the pantry.",
+    InputSchemaJson = "{\"type\":\"object\",\"properties\":{\"ingredient\":{\"type\":\"string\"}},\"required\":[\"ingredient\"]}",
+  });
+  request.ToolChoice = choice;
+  if (choice == LlmToolChoice.Named) { request.ToolChoiceName = "in_pantry"; }
+  return await Llm.Complete(request, new LlmCall());
+}

@@ -26,10 +26,14 @@ public class OpenAiChatRequest {
   /// Set only when streaming. `stream_options` is legal only beside it.
   [ExternalName("stream")] public bool? Stream;
   [ExternalName("stream_options")] public OpenAiStreamOptions? StreamOptions;
+  /// Absent when the model decides for itself, which is OpenAI's default.
+  [ExternalName("tool_choice")] public Json? ToolChoice;
+  /// The answer's shape, when the request asks for a document of a schema. Absent for free text.
+  [ExternalName("response_format")] public Json? ResponseFormat;
 }
 
 /// ⚠ `include_usage` IS WHAT MAKES A STREAM METERABLE. Without it the token counts never arrive, and the last event of
-/// the stream — the one the platform bills from — carries zeros.
+/// the stream — the one the call is priced from — carries zeros.
 public class OpenAiStreamOptions {
   [ExternalName("include_usage")] public bool IncludeUsage = true;
 }
@@ -68,7 +72,7 @@ public class OpenAiToolCallFunction {
   [ExternalName("arguments")] public string? Arguments;
 }
 
-/// The token counts. ⚠ The platform meters from these, and `prompt_tokens` INCLUDES the cached prefix — see
+/// The token counts. ⚠ The meter prices from these, and `prompt_tokens` INCLUDES the cached prefix — see
 /// `OpenAiClient.Cached`, which is why the client subtracts it rather than reporting both.
 public class OpenAiUsage {
   [ExternalName("prompt_tokens")] public int PromptTokens;

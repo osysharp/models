@@ -1,0 +1,16 @@
+// The box's models, and their keys. In a file of its own with no `namespace`, because an `app.X = …` statement's value
+// is resolved outside the file's namespace.
+using Osysharp.Llm;
+using Osysharp.Models.OpenAi;
+
+app.Secrets = [ new Secret("OpenAi"), new Secret("Annex") ];
+
+app.Llm = new LlmSetup {
+  Models = [
+    new LlmModel { Name = "Reader", Client = new OpenAiClient { ApiKey = Secret.OpenAi }, Model = "gpt-4o-mini",
+                   Price = new LlmPrice { Input = 0.15m, Output = 0.6m, CacheRead = 0.075m } },
+    // An endpoint of the box's own that speaks OpenAI's wire, with the older name for the token limit.
+    new LlmModel { Name = "Local", Client = new OpenAiClient { ApiKey = Secret.Annex, BaseUrl = "https://models.annex.example",
+                                                               LegacyMaxTokens = true }, Model = "llama-3.3-70b" },
+  ],
+};

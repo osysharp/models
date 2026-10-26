@@ -96,3 +96,101 @@ the meter's tokens and cost; a typed value asked for through `output_config.form
 ```
 osy test kits/anthropic/tests
 ```
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using FerryDesk;
+
+[Test(Desk)]
+void a_question_goes_out_in_anthropics_shape_and_its_answer_and_usage_come_back() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Url = url, Body = body, Key = headers["x-api-key"] };
+    return Says("The 14:10 from Visby.", 2000, 400);
+  });
+  Assert.Equal("The 14:10 from Visby.", Answer("When is the next ferry from Visby?"));
+
+  var sent = Sent.Single();
+  Assert.Equal("https://api.anthropic.com/v1/messages", sent.Url);
+  Assert.Equal("sk-ant-test", sent.Key);
+  // The provider's own id for the model, the question as a user turn, and a max_tokens — which Anthropic requires.
+  Assert.Contains("\"model\":\"claude-haiku-5-5\"", sent.Body);
+  Assert.Contains("\"role\":\"user\"", sent.Body);
+  Assert.Contains("When is the next ferry from Visby?", sent.Body);
+  Assert.Contains("\"max_tokens\":", sent.Body);
+  // Nothing that was not asked for: no tool choice, no output format, no sampling on a model that removed it.
+  Assert.DoesNotContain("tool_choice", sent.Body);
+  Assert.DoesNotContain("output_config", sent.Body);
+  Assert.DoesNotContain("temperature", sent.Body);
+
+  // Anthropic's own counts are what the meter prices: 2000 at $0.10 a million and 400 at $0.50.
+  var row = ModelCall.Single();
+  Assert.Equal(2000, row.InputTokens);
+  Assert.Equal(400, row.OutputTokens);
+  Assert.Equal(400, row.CostMicros);
+}
+```
+
+From [`tests/anthropic.test.osy`](tests/anthropic.test.osy).
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using FerryDesk;
+
+[Test(Desk)]
+void a_typed_value_is_asked_for_as_anthropics_own_output_format_and_read_from_the_text_block() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body, Seq = Sent.Count() };
+    return Says("{\"From\":\"Visby\",\"To\":\"Nynäshamn\",\"Passengers\":2,\"WithCar\":true}", 900, 60);
+  });
+  var crossing = ReadCrossing("Two of us and the car, Visby to Nynäshamn on Friday.", "Desk");
+  Assert.Equal("Visby", crossing.From);
+  Assert.Equal("Nynäshamn", crossing.To);
+  Assert.Equal(2, crossing.Passengers);
+  Assert.True(crossing.WithCar);
+
+  var body = Sent.Single().Body;
+  Assert.Contains("\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{", body);
+  Assert.Contains("\"Passengers\"", body);
+  Assert.Contains("Whether they bring a car.", body);
+}
+```
+
+From [`tests/anthropic.test.osy`](tests/anthropic.test.osy).
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using FerryDesk;
+
+[Test(Desk)]
+void told_to_the_schema_goes_into_the_prompt_instead() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body, Seq = Sent.Count() };
+    return Says("{\"From\":\"Visby\",\"To\":\"Oskarshamn\",\"Passengers\":1,\"WithCar\":false}", 900, 60);
+  });
+  Assert.Equal("Oskarshamn", ReadCrossing("Just me, Visby to Oskarshamn.", "Prompted").To);
+  var body = Sent.Single().Body;
+  Assert.DoesNotContain("output_config", body);
+  Assert.Contains("Answer with one JSON document of this schema", body);
+  Assert.Contains("Passengers", body);
+}
+```
+
+From [`tests/anthropic.test.osy`](tests/anthropic.test.osy).
+
+## Learn more
+
+- [The Osysharp.Models.Anthropic reference](https://osysharp.com/reference/agent/kit-anthropic/)
+- [Osysharp.Models.Anthropic in the package catalogue](https://osysharp.com/packages/#osysharp-models-anthropic)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).

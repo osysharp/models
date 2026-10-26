@@ -125,3 +125,104 @@ on the meter as a failed call.
 ```
 osy test kits/openai/tests
 ```
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using RecipeBox;
+
+[Test(Keys)]
+void a_question_goes_out_in_openais_shape_and_its_answer_and_usage_come_back() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Url = url, Body = body, Authorization = headers["authorization"] };
+    return Says("Twenty minutes.", 3000, 1000, 500);
+  });
+  Assert.Equal("Twenty minutes.", Answer("How long do lentils take?"));
+
+  var sent = Sent.Single();
+  Assert.Equal("https://api.openai.com/v1/chat/completions", sent.Url);
+  Assert.Equal("Bearer sk-test", sent.Authorization);
+  Assert.Contains("\"model\":\"gpt-4o-mini\"", sent.Body);
+  Assert.Contains("How long do lentils take?", sent.Body);
+  // The current name for the limit, and nothing that was not asked for.
+  Assert.Contains("\"max_completion_tokens\":", sent.Body);
+  Assert.DoesNotContain("\"max_tokens\":", sent.Body);
+  Assert.DoesNotContain("tool_choice", sent.Body);
+  Assert.DoesNotContain("response_format", sent.Body);
+
+  // OpenAI counts the cached prefix inside the prompt; the meter is told them apart:
+  // 2000 fresh at $0.15 a million, 1000 cached at $0.075, 500 out at $0.60 — 300 + 75 + 300.
+  var row = ModelCall.Single();
+  Assert.Equal(2000, row.InputTokens);
+  Assert.Equal(1000, row.CacheReadTokens);
+  Assert.Equal(500, row.OutputTokens);
+  Assert.Equal(675, row.CostMicros);
+}
+```
+
+From [`tests/openai.test.osy`](tests/openai.test.osy).
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using RecipeBox;
+
+[Test(Keys)]
+void an_endpoint_that_speaks_the_same_wire_is_reached_at_its_own_address_with_its_own_key() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Url = url, Body = body, Authorization = headers["authorization"] };
+    return Says("Soak them first.", 100, 0, 10);
+  });
+  Assert.Equal("Soak them first.", AnswerLocally("And chickpeas?"));
+  var sent = Sent.Single();
+  Assert.Equal("https://models.annex.example/v1/chat/completions", sent.Url);
+  Assert.Equal("Bearer annex-key", sent.Authorization);
+  Assert.Contains("\"model\":\"llama-3.3-70b\"", sent.Body);
+  // The older name for the limit, which such endpoints still take.
+  Assert.Contains("\"max_tokens\":", sent.Body);
+  Assert.DoesNotContain("max_completion_tokens", sent.Body);
+}
+```
+
+From [`tests/openai.test.osy`](tests/openai.test.osy).
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using RecipeBox;
+
+[Test(Keys)]
+void a_typed_value_is_asked_for_as_openais_response_format_and_read_from_the_content() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body };
+    return Says("{\"Title\":\"Dal\",\"Serves\":4,\"Minutes\":35,\"Vegetarian\":true}", 800, 0, 40);
+  });
+  var recipe = ReadRecipe("Dal for four: red lentils, onion, tomato… on the table in 35 minutes.");
+  Assert.Equal("Dal", recipe.Title);
+  Assert.Equal(4, recipe.Serves);
+  Assert.Equal(35, recipe.Minutes);
+  Assert.True(recipe.Vegetarian);
+
+  var body = Sent.Single().Body;
+  Assert.Contains("\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{", body);
+  Assert.Contains("\"strict\":false", body);
+  Assert.Contains("Minutes from start to table.", body);
+}
+```
+
+From [`tests/openai.test.osy`](tests/openai.test.osy).
+
+## Learn more
+
+- [The Osysharp.Models.OpenAi reference](https://osysharp.com/reference/agent/kit-openai/)
+- [Osysharp.Models.OpenAi in the package catalogue](https://osysharp.com/packages/#osysharp-models-openai)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).

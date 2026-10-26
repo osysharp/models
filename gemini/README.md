@@ -109,3 +109,114 @@ and a 503 answer surfacing as the provider's failure and landing on the meter as
 ```
 osy test kits/gemini/tests
 ```
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using PlantNursery;
+
+[Test(Keys)]
+void a_question_goes_out_in_geminis_shape_and_its_answer_and_usage_come_back() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Url = url, Body = body, Key = headers["x-goog-api-key"] };
+    return Says("Once a week.", 5000, 1000, 200);
+  });
+  Assert.Equal("Once a week.", Answer("How often do I water a fig?"));
+
+  var sent = Sent.Single();
+  // The model travels in the address, and the key in a header — never in the address.
+  Assert.Equal("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", sent.Url);
+  Assert.Equal("g-test", sent.Key);
+  Assert.DoesNotContain("\"model\"", sent.Body);
+  // The system prompt is its own object, and the question a user turn.
+  Assert.Contains("\"system_instruction\":{\"parts\":[{\"text\":\"You advise growers.\"}]}", sent.Body);
+  Assert.Contains("How often do I water a fig?", sent.Body);
+  Assert.DoesNotContain("toolConfig", sent.Body);
+  Assert.DoesNotContain("responseMimeType", sent.Body);
+
+  // Google counts the cached prefix inside the prompt; the meter is told them apart:
+  // 4000 fresh at $0.30 a million, 1000 cached at $0.03, 200 out at $2.50 — 1200 + 30 + 500.
+  var row = ModelCall.Single();
+  Assert.Equal(4000, row.InputTokens);
+  Assert.Equal(1000, row.CacheReadTokens);
+  Assert.Equal(200, row.OutputTokens);
+  Assert.Equal(1730, row.CostMicros);
+}
+```
+
+From [`tests/gemini.test.osy`](tests/gemini.test.osy).
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using PlantNursery;
+
+[Test(Keys)]
+void a_typed_value_is_asked_for_as_geminis_response_schema_and_read_from_the_text() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body };
+    return Says("{\"Plant\":\"Ficus carica\",\"WaterEveryDays\":7,\"FullSun\":true}", 600, 0, 30);
+  });
+  var care = ReadLabel("Ficus carica — full sun, water weekly.");
+  Assert.Equal("Ficus carica", care.Plant);
+  Assert.Equal(7, care.WaterEveryDays);
+  Assert.True(care.FullSun);
+
+  var body = Sent.Single().Body;
+  Assert.Contains("\"responseMimeType\":\"application/json\"", body);
+  Assert.Contains("\"responseJsonSchema\":{", body);
+  Assert.Contains("Days between waterings.", body);
+}
+```
+
+From [`tests/gemini.test.osy`](tests/gemini.test.osy).
+
+```osy
+using Osysharp.Llm;
+using Osysharp.Http;
+using PlantNursery;
+
+[Test(Keys)]
+void a_tool_call_comes_back_as_one_and_a_forced_choice_is_sent_in_geminis_words() {
+  Http.Post.Stub((url, body, headers) => {
+    new Sent { Body = body, Seq = Sent.Count() };
+    return new HttpResponse { StatusCode = 200, Body =
+      "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"in_stock\",\"args\":{\"plant\":\"fig\"}}}]},"
+      + "\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":150,\"candidatesTokenCount\":12,\"cachedContentTokenCount\":0}}" };
+  });
+
+  var auto = AskWithStock("Any figs left?", LlmToolChoice.Auto);
+  // Gemini says STOP for a tool call too; the call itself is what says the model wants a tool run.
+  Assert.Equal(LlmStopReason.ToolUse, auto.Response.StopReason);
+  var call = auto.Response.Content.Single();
+  Assert.Equal(LlmBlockKind.ToolUse, call.Kind);
+  Assert.Equal("in_stock", call.ToolName);
+  Assert.Contains("\"plant\":\"fig\"", call.InputJson!);
+
+  AskWithStock("Any figs left?", LlmToolChoice.Any);
+  AskWithStock("Any figs left?", LlmToolChoice.None);
+  AskWithStock("Any figs left?", LlmToolChoice.Named);
+  var bodies = Sent.OrderBy(s => s.Seq).ToList().Select(s => s.Body).ToList();
+  Assert.DoesNotContain("toolConfig", bodies[0]);
+  Assert.Contains("\"toolConfig\":{\"functionCallingConfig\":{\"mode\":\"ANY\"}}", bodies[1]);
+  Assert.Contains("\"toolConfig\":{\"functionCallingConfig\":{\"mode\":\"NONE\"}}", bodies[2]);
+  Assert.Contains("\"allowedFunctionNames\":[\"in_stock\"]", bodies[3]);
+}
+```
+
+From [`tests/gemini.test.osy`](tests/gemini.test.osy).
+
+## Learn more
+
+- [The Osysharp.Models.Gemini reference](https://osysharp.com/reference/agent/kit-gemini/)
+- [Osysharp.Models.Gemini in the package catalogue](https://osysharp.com/packages/#osysharp-models-gemini)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).

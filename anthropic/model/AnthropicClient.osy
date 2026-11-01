@@ -16,6 +16,11 @@ using Osysharp.Llm;
 /// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
 /// happen above the seam, from the token counts reported here — so report what Anthropic reported, never an estimate.
 public class AnthropicClient : ILlmClient {
+  /// A `new { … }` handed on as the `Json` document it is. osy 0.17.13 and 0.17.14 put a bare anonymous object into a
+  /// `List<Json>` as the object rather than its document, and the body nesting the list then failed to send; passing it
+  /// through a `Json` parameter converts it on every release.
+  Json Document(Json value) { return value; }
+
   /// The API key. Declared where the client is registered, so the app names its own secret:
   /// `Client = new AnthropicClient { ApiKey = Secret.Anthropic }`.
   public string ApiKey = "";
@@ -160,10 +165,10 @@ public class AnthropicClient : ILlmClient {
         // The schema arrives as JSON TEXT the app did not author, so it is nested as a document rather than quoted.
         Json schema = t.InputSchemaJson;
         if (cacheThis) {
-          declared.Add(new { name = t.Name, description = t.Description, input_schema = schema,
-                             cache_control = new { type = "ephemeral" } });
+          declared.Add(Document(new { name = t.Name, description = t.Description, input_schema = schema,
+                             cache_control = new { type = "ephemeral" } }));
         } else {
-          declared.Add(new { name = t.Name, description = t.Description, input_schema = schema });
+          declared.Add(Document(new { name = t.Name, description = t.Description, input_schema = schema }));
         }
         index = index + 1;
       }
@@ -203,26 +208,26 @@ public class AnthropicClient : ILlmClient {
       var last = index == message.Content.Count - 1;
       if (b.Kind == LlmBlockKind.Text) {
         if (message.CacheBreakpoint && last) {
-          content.Add(new { type = "text", text = b.Text ?? "", cache_control = new { type = "ephemeral" } });
+          content.Add(Document(new { type = "text", text = b.Text ?? "", cache_control = new { type = "ephemeral" } }));
         } else {
-          content.Add(new { type = "text", text = b.Text ?? "" });
+          content.Add(Document(new { type = "text", text = b.Text ?? "" }));
         }
       } else if (b.Kind == LlmBlockKind.Image) {
-        content.Add(new { type = "image",
-                          source = new { type = "base64", media_type = b.MediaType ?? "", data = b.DataBase64 ?? "" } });
+        content.Add(Document(new { type = "image",
+                          source = new { type = "base64", media_type = b.MediaType ?? "", data = b.DataBase64 ?? "" } }));
       } else if (b.Kind == LlmBlockKind.Document) {
-        content.Add(new { type = "document",
-                          source = new { type = "base64", media_type = b.MediaType ?? "", data = b.DataBase64 ?? "" } });
+        content.Add(Document(new { type = "document",
+                          source = new { type = "base64", media_type = b.MediaType ?? "", data = b.DataBase64 ?? "" } }));
       } else if (b.Kind == LlmBlockKind.ToolUse) {
         Json arguments = b.InputJson ?? "{}";
-        content.Add(new { type = "tool_use", id = b.ToolUseId ?? "", name = b.ToolName ?? "",
-                          input = arguments });
+        content.Add(Document(new { type = "tool_use", id = b.ToolUseId ?? "", name = b.ToolName ?? "",
+                          input = arguments }));
       } else if (b.Kind == LlmBlockKind.ToolResult) {
         if (b.IsError) {
-          content.Add(new { type = "tool_result", tool_use_id = b.ToolUseId ?? "",
-                            content = b.ResultJson ?? "", is_error = true });
+          content.Add(Document(new { type = "tool_result", tool_use_id = b.ToolUseId ?? "",
+                            content = b.ResultJson ?? "", is_error = true }));
         } else {
-          content.Add(new { type = "tool_result", tool_use_id = b.ToolUseId ?? "", content = b.ResultJson ?? "" });
+          content.Add(Document(new { type = "tool_result", tool_use_id = b.ToolUseId ?? "", content = b.ResultJson ?? "" }));
         }
       }
       index = index + 1;
@@ -240,8 +245,8 @@ public class AnthropicClient : ILlmClient {
   List<Json> SystemContent(LlmRequest request) {
     List<Json> blocks = SystemBlocks(request);
     if (request.OutputSchemaJson != null && !NativeStructuredOutput) {
-      blocks.Add(new { type = "text", text = "Answer with one JSON document of this schema, and nothing else — no words "
-        + "before or after it, no code fence:\n" + request.OutputSchemaJson! });
+      blocks.Add(Document(new { type = "text", text = "Answer with one JSON document of this schema, and nothing else — no words "
+        + "before or after it, no code fence:\n" + request.OutputSchemaJson! }));
     }
     return blocks;
   }
@@ -249,7 +254,7 @@ public class AnthropicClient : ILlmClient {
   List<Json> SystemBlocks(LlmRequest request) {
     List<Json> blocks = [];
     if (request.SystemSegments.Count == 0) {
-      if (request.SystemPrompt != null) { blocks.Add(new { type = "text", text = request.SystemPrompt }); }
+      if (request.SystemPrompt != null) { blocks.Add(Document(new { type = "text", text = request.SystemPrompt })); }
       return blocks;
     }
 
@@ -262,9 +267,9 @@ public class AnthropicClient : ILlmClient {
         || request.SystemSegments[index + 1].Stability != segment.Stability;
       var cacheThis = lastInTier && segment.Stability != LlmCacheStability.TurnLevel && accumulated >= 1024;
       if (cacheThis) {
-        blocks.Add(new { type = "text", text = segment.Content, cache_control = new { type = "ephemeral" } });
+        blocks.Add(Document(new { type = "text", text = segment.Content, cache_control = new { type = "ephemeral" } }));
       } else {
-        blocks.Add(new { type = "text", text = segment.Content });
+        blocks.Add(Document(new { type = "text", text = segment.Content }));
       }
       index = index + 1;
     }

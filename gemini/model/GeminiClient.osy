@@ -21,6 +21,11 @@ using Osysharp.Llm;
 /// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
 /// happen above the seam, from the token counts reported here — so report what Gemini reported, never an estimate.
 public class GeminiClient : ILlmClient {
+  /// A `new { … }` handed on as the `Json` document it is. osy 0.17.13 and 0.17.14 put a bare anonymous object into a
+  /// `List<Json>` as the object rather than its document, and the body nesting the list then failed to send; passing it
+  /// through a `Json` parameter converts it on every release.
+  Json Document(Json value) { return value; }
+
   /// The API key. Declared where the client is registered, so the app names its own secret:
   /// `Client = new GeminiClient { ApiKey = Secret.Gemini }`.
   public string ApiKey = "";
@@ -167,7 +172,7 @@ public class GeminiClient : ILlmClient {
     var system = SystemText(request);
     if (system != "") {
       List<Json> parts = [];
-      parts.Add(new { text = system });
+      parts.Add(Document(new { text = system }));
       body.SystemInstruction = new { parts = parts };
     }
 
@@ -176,11 +181,11 @@ public class GeminiClient : ILlmClient {
       foreach (var t in request.Tools) {
         // The schema arrives as JSON TEXT the app did not author, so it is nested as a document rather than quoted.
         Json schema = t.InputSchemaJson;
-        declared.Add(new { name = t.Name, description = t.Description, parameters = schema });
+        declared.Add(Document(new { name = t.Name, description = t.Description, parameters = schema }));
       }
       // ⚠ ONE tool object holding every declaration — Gemini's shape, not one object per tool.
       List<Json> tools = [];
-      tools.Add(new { functionDeclarations = declared });
+      tools.Add(Document(new { functionDeclarations = declared }));
       body.Tools = tools;
 
       // Whether the model may, must or may not call a tool: Gemini's `ANY` and `NONE` modes, with the one function
@@ -213,24 +218,24 @@ public class GeminiClient : ILlmClient {
       List<Json> parts = [];
       foreach (var b in m.Content) {
         if (b.Kind == LlmBlockKind.Text) {
-          parts.Add(new { text = b.Text ?? "" });
+          parts.Add(Document(new { text = b.Text ?? "" }));
         } else if (b.Kind == LlmBlockKind.Image || b.Kind == LlmBlockKind.Document) {
           // A picture and a PDF are both inline data to Gemini, told apart by their media type.
-          parts.Add(new { inlineData = new { mimeType = b.MediaType ?? "", data = b.DataBase64 ?? "" } });
+          parts.Add(Document(new { inlineData = new { mimeType = b.MediaType ?? "", data = b.DataBase64 ?? "" } }));
         } else if (b.Kind == LlmBlockKind.ToolUse) {
           Json arguments = b.InputJson == null || b.InputJson == "" ? "{}" : b.InputJson;
-          parts.Add(new { functionCall = new { name = b.ToolName ?? "", args = arguments } });
+          parts.Add(Document(new { functionCall = new { name = b.ToolName ?? "", args = arguments } }));
         } else if (b.Kind == LlmBlockKind.ToolResult) {
           // ⚠ KEYED BY THE FUNCTION'S NAME, because Gemini has no call id to key by — so the name is recovered from
           // the assistant turn that asked for it. Falling back to the id keeps a malformed conversation legible
           // rather than sending an empty name.
           var id = b.ToolUseId ?? "";
-          parts.Add(new { functionResponse = new { name = names.GetValueOrDefault(id, id), response = Wrapped(b.ResultJson) } });
+          parts.Add(Document(new { functionResponse = new { name = names.GetValueOrDefault(id, id), response = Wrapped(b.ResultJson) } }));
         }
       }
       if (parts.Count > 0) {
         // Gemini's roles: the neutral "assistant" is "model", and a tool result rides under "user".
-        all.Add(new { role = m.Role == "assistant" ? "model" : "user", parts = parts });
+        all.Add(Document(new { role = m.Role == "assistant" ? "model" : "user", parts = parts }));
       }
     }
     return all;

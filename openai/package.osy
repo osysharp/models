@@ -13,8 +13,8 @@
 // it declares `egress consumer;` instead, which says "a host you choose" without naming one. Grant your host on the
 // `use` (see the README); your grant is the only thing that names it, and it is the only authority.
 package Osysharp.Models.OpenAi {
-  version "1.0.0";
-  minPlatform "0.14.0";
+  version "1.1.0";
+  minPlatform "0.17.0";
   summary     "the OpenAI Chat Completions API as a model provider for Osysharp.Llm — and any endpoint that speaks its wire.";
 
   model "model/*.osy";

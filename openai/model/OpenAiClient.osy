@@ -21,6 +21,11 @@ using Osysharp.Llm;
 /// ⛔ NOR DOES IT POLICE SPEND. The kill switch, the budget reservation, the metering row and the cost rollup all
 /// happen above the seam, from the token counts reported here — so report what OpenAI reported, never an estimate.
 public class OpenAiClient : ILlmClient {
+  /// A `new { … }` handed on as the `Json` document it is. osy 0.17.13 and 0.17.14 put a bare anonymous object into a
+  /// `List<Json>` as the object rather than its document, and the body nesting the list then failed to send; passing it
+  /// through a `Json` parameter converts it on every release.
+  Json Document(Json value) { return value; }
+
   /// The API key. Declared where the client is registered, so the app names its own secret:
   /// `Client = new OpenAiClient { ApiKey = Secret.OpenAi }`.
   public string ApiKey = "";
@@ -212,7 +217,7 @@ public class OpenAiClient : ILlmClient {
     List<Json> all = [];
 
     var system = SystemText(request);
-    if (system != "") { all.Add(new { role = "system", content = system }); }
+    if (system != "") { all.Add(Document(new { role = "system", content = system })); }
 
     foreach (var m in request.Messages) {
       var text = "";
@@ -225,34 +230,34 @@ public class OpenAiClient : ILlmClient {
           text = text + (b.Text ?? "");
         } else if (b.Kind == LlmBlockKind.Image) {
           // OpenAI takes the bytes as a data: URL rather than a media type beside them.
-          images.Add(new { type = "image_url",
-                           image_url = new { url = "data:" + (b.MediaType ?? "") + ";base64," + (b.DataBase64 ?? "") } });
+          images.Add(Document(new { type = "image_url",
+                           image_url = new { url = "data:" + (b.MediaType ?? "") + ";base64," + (b.DataBase64 ?? "") } }));
         } else if (b.Kind == LlmBlockKind.Document) {
           // A PDF goes as a `file` part, its bytes a data: URL the same way.
-          images.Add(new { type = "file",
-                           file = new { filename = "document.pdf", file_data = "data:" + (b.MediaType ?? "") + ";base64," + (b.DataBase64 ?? "") } });
+          images.Add(Document(new { type = "file",
+                           file = new { filename = "document.pdf", file_data = "data:" + (b.MediaType ?? "") + ";base64," + (b.DataBase64 ?? "") } }));
         } else if (b.Kind == LlmBlockKind.ToolUse) {
-          toolCalls.Add(new { id = b.ToolUseId ?? "", type = "function",
-                              function = new { name = b.ToolName ?? "", arguments = b.InputJson ?? "{}" } });
+          toolCalls.Add(Document(new { id = b.ToolUseId ?? "", type = "function",
+                              function = new { name = b.ToolName ?? "", arguments = b.InputJson ?? "{}" } }));
         } else if (b.Kind == LlmBlockKind.ToolResult) {
-          results.Add(new { role = "tool", tool_call_id = b.ToolUseId ?? "", content = b.ResultJson ?? "" });
+          results.Add(Document(new { role = "tool", tool_call_id = b.ToolUseId ?? "", content = b.ResultJson ?? "" }));
         }
       }
 
       if (toolCalls.Count > 0) {
         // An assistant turn that called tools may have no words of its own, and `content` is then left out rather
         // than sent empty.
-        if (text != "") { all.Add(new { role = m.Role, content = text, tool_calls = toolCalls }); }
-        else { all.Add(new { role = m.Role, tool_calls = toolCalls }); }
+        if (text != "") { all.Add(Document(new { role = m.Role, content = text, tool_calls = toolCalls })); }
+        else { all.Add(Document(new { role = m.Role, tool_calls = toolCalls })); }
       } else if (images.Count > 0) {
         // A turn carrying an image writes `content` as an ARRAY of parts — text first, so the instruction is read
         // before what it is about.
         List<Json> parts = [];
-        if (text != "") { parts.Add(new { type = "text", text = text }); }
+        if (text != "") { parts.Add(Document(new { type = "text", text = text })); }
         foreach (var image in images) { parts.Add(image); }
-        all.Add(new { role = m.Role, content = parts });
+        all.Add(Document(new { role = m.Role, content = parts }));
       } else if (text != "") {
-        all.Add(new { role = m.Role, content = text });
+        all.Add(Document(new { role = m.Role, content = text }));
       }
 
       // A tool result is always its own message, whatever role the neutral one carried.
@@ -278,8 +283,8 @@ public class OpenAiClient : ILlmClient {
     foreach (var t in request.Tools) {
       // The schema arrives as JSON TEXT the app did not author, so it is nested as a document rather than quoted.
       Json schema = t.InputSchemaJson;
-      tools.Add(new { type = "function",
-                      function = new { name = t.Name, description = t.Description, parameters = schema } });
+      tools.Add(Document(new { type = "function",
+                      function = new { name = t.Name, description = t.Description, parameters = schema } }));
     }
     return tools;
   }

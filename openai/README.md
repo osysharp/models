@@ -22,7 +22,7 @@ It has no user interface, so there is nothing to screenshot: it is where a model
 // app.osy — a package gets no authority from being depended on, so the host is granted here or the app does not compile
 app Support {
   model "**/*.osy";
-  use Osysharp.Llm@2;
+  use Osysharp.Llm@3;
   use Osysharp.Models.OpenAi@1 { egress "api.openai.com"; }
 }
 ```
@@ -56,7 +56,7 @@ class with two settings:
 ```osy
 app Support {
   model "**/*.osy";
-  use Osysharp.Llm@2;
+  use Osysharp.Llm@3;
   use Osysharp.Models.OpenAi@1 {
     egress "api.openai.com";
     egress "vllm.internal";     // YOUR host. This package cannot declare a host its consumer chooses.
